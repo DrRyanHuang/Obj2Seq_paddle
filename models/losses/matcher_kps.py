@@ -14,9 +14,9 @@
 """
 Modules to compute the matching cost and solve the corresponding LSAP.
 """
-import torch
+# import torch
 from scipy.optimize import linear_sum_assignment
-from torch import nn
+from paddle import nn
 
 import numpy as np
 from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
@@ -39,9 +39,9 @@ def joint_oks(src_joints, tgt_joints, tgt_bboxes, joint_sigmas=KPS_OKS_SIGMAS, w
     #     assert src_joints.size(1) == tgt_joints.size(1) + 1
     #     tgt_center = tgt_bboxes[..., 0:2]
     #     sigma_center = joint_sigmas.mean()
-    #     tgt_joints = torch.cat([tgt_joints, tgt_center[:, None, :]], dim=1)
+    #     tgt_joints = paddle.concat([tgt_joints, tgt_center[:, None, :]], axis=1)
     #     joint_sigmas = np.append(joint_sigmas, np.array([sigma_center]), axis=0)
-    #     tgt_flags = torch.cat([tgt_flags, torch.ones([num_gts, 1]).type_as(tgt_flags)], dim=1)
+    #     tgt_flags = paddle.concat([tgt_flags, torch.ones([num_gts, 1]).type_as(tgt_flags)], axis=1)
     #     num_kpts = num_kpts + 1
 
     areas = tgt_areas.unsqueeze(1).expand(num_gts, num_kpts)
@@ -57,7 +57,7 @@ def joint_oks(src_joints, tgt_joints, tgt_bboxes, joint_sigmas=KPS_OKS_SIGMAS, w
     return oks
 
 
-class HungarianMatcher(nn.Module):
+class HungarianMatcher(nn.Layer):
     """This class computes an assignment between the targets and the predictions of the network
 
     For efficiency reasons, the targets don't include the no_object. Because of this, in general,
@@ -147,13 +147,13 @@ class HungarianMatcher(nn.Module):
                 out_keypoints = outputs["pred_keypoints"].flatten(0, 1)
 
             # Also concat the target labels and boxes
-            # tgt_ids = torch.cat([v["labels"] for v in targets])
-            tgt_bbox = torch.cat([v["boxes"] for v in targets])
+            # tgt_ids = paddle.concat([v["labels"] for v in targets])
+            tgt_bbox = paddle.concat([v["boxes"] for v in targets])
             sizes = [t["keypoints"].shape[0] for t in targets]
             num_local = sum(sizes)
 
             if num_local == 0:
-                return [(torch.as_tensor([], dtype=torch.int64), torch.as_tensor([], dtype=torch.int64)) for _ in sizes]
+                return [(paddle.to_tensor([], dtype=torch.int64), paddle.to_tensor([], dtype=torch.int64)) for _ in sizes]
 
             # Compute the classification cost.
             if self.class_type == "probs":
@@ -170,7 +170,7 @@ class HungarianMatcher(nn.Module):
                 neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
                 pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
                 cost_class = pos_cost_class - neg_cost_class # [batch_size * num_queries]
-            cost_class = cost_class[..., None].repeat(1, num_local)
+            cost_class = cost_class[..., None].tile(1, num_local)
             # 根据需求进行归一化
             # 以分类损失作为起点
             C = self.cost_class * cost_class / NORMALIZER[self.class_normalization]
@@ -194,10 +194,10 @@ class HungarianMatcher(nn.Module):
                 C = C + C_box
 
             if self.with_keypoints:
-                tgt_kps = torch.cat([v["keypoints"] for v in targets])# tgt, 17, 3
+                tgt_kps = paddle.concat([v["keypoints"] for v in targets])# tgt, 17, 3
                 tgt_visible = tgt_kps[..., -1] # tgt, 17
                 tgt_kps = tgt_kps[..., :2] # tgt, 17, 2
-                tgt_visible = (tgt_visible > 0) * (tgt_kps >= 0).all(dim=-1) * (tgt_kps <= 1).all(dim=-1) # # tgt, 17
+                tgt_visible = (tgt_visible > 0) * (tgt_kps >= 0).all(axis=-1) * (tgt_kps <= 1).all(axis=-1) # # tgt, 17
                 if self.cost_kps_l1 > 0.:
                     out_kps = out_keypoints.unsqueeze(1) # bs*nobj, 1, 17, 2
                     tgt_kps_t = tgt_kps.unsqueeze(0) # 1, tgt, 17, 2
@@ -210,7 +210,7 @@ class HungarianMatcher(nn.Module):
                     # cost_kps_l1 = torch.cdist(out_kps, tgt_kps_t, p=1).permute(1, 2, 0) * tgt_visible # bs*nobj, tgt, 17
                     cost_kps_l1 = cost_kps_l1.sum(-1)
                     if self.keypoint_normalization == "box_average":
-                        cost_kps_l1 = cost_kps_l1 / tgt_visible.sum(-1).clamp(min=1.)
+                        cost_kps_l1 = cost_kps_l1 / tgt_visible.sum(-1).clip(min=1.)
                     C_kps_l1 = self.cost_kps_l1 * cost_kps_l1 / NORMALIZER[self.keypoint_normalization]
                     C = C + C_kps_l1
 
@@ -219,7 +219,7 @@ class HungarianMatcher(nn.Module):
 
                 if self.cost_kps_oks > 0.:
                     # Compute the relative oks cost between joints
-                    cat_tgt_kps = torch.cat([tgt_kps, tgt_visible.unsqueeze(-1)], dim=-1)
+                    cat_tgt_kps = paddle.concat([tgt_kps, tgt_visible.unsqueeze(-1)], axis=-1)
                     cost_oks = -joint_oks(out_keypoints, cat_tgt_kps, tgt_bbox)
                     C_kps_oks = self.cost_kps_oks * cost_oks / NORMALIZER[self.box_normalization]
                     C = C + C_kps_oks
@@ -227,12 +227,12 @@ class HungarianMatcher(nn.Module):
                     if save_print:
                         self.record_history["kps_oks"].append(C_kps_oks.max() - C_kps_oks.min())
 
-            C = C.view(bs, num_queries, -1).cpu()
+            C = C.reshape(bs, num_queries, -1).cpu()
             if save_print:
                 self.printMatcher()
 
             indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
-            return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+            return [(paddle.to_tensor(i, dtype=torch.int64), paddle.to_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 
 def build_matcher(args):

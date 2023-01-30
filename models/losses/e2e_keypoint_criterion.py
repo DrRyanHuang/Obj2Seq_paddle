@@ -11,9 +11,9 @@
 # Modified from DETR (https://github.com/facebookresearch/detr)
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 # ------------------------------------------------------------------------
-import torch
-import torch.nn.functional as F
-from torch import nn
+# import torch
+# import torch.nn.functional as F
+from paddle import nn
 
 from .matcher_kps import build_matcher
 from .losses import sigmoid_focal_loss
@@ -29,7 +29,7 @@ KPS_OKS_SIGMAS = np.array([
 ]) / 10.0
 
 
-class FixedMatcher(nn.Module):
+class FixedMatcher(nn.Layer):
     def __init__(self, args):
         super().__init__()
         self.matcher_train = torch.load(args.fix_match_train)
@@ -42,7 +42,7 @@ class FixedMatcher(nn.Module):
             return [self.matcher_val[itgt["image_id"]] for itgt in targets]
 
 
-class KeypointSetCriterion(nn.Module):
+class KeypointSetCriterion(nn.Layer):
     """ This class computes the loss for DETR.
     The process happens in two steps:
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
@@ -91,7 +91,7 @@ class KeypointSetCriterion(nn.Module):
         src_logits = outputs['pred_logits']
 
         idx = self._get_src_permutation_idx(indices)
-        target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1]],
+        target_classes_onehot = paddle.zeros([src_logits.shape[0], src_logits.shape[1]],
                                             dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
         target_classes_onehot[idx] = 1
 
@@ -115,7 +115,7 @@ class KeypointSetCriterion(nn.Module):
         src_logits = outputs['pred_logits'].sigmoid()
         # valid_src_flag = torch.ones_like(src_logits)
         # valid_src_flag[srcs_idx] = targets['with_joint_flag'][tgts_idx].float()
-        target_logits = torch.zeros_like(src_logits)
+        target_logits = paddle.zeros_like(src_logits)
         target_logits[srcs_idx] = 1.0
         weight_matrix = torch.full_like(src_logits, self.bce_negative_weight)
         weight_matrix[srcs_idx] = 1.0
@@ -136,7 +136,7 @@ class KeypointSetCriterion(nn.Module):
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_boxes = paddle.concat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], axis=0)
 
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
 
@@ -153,12 +153,12 @@ class KeypointSetCriterion(nn.Module):
 
         idx = self._get_src_permutation_idx(indices)
         src_joints = outputs['pred_keypoints'][idx] # tgt, 17, 2
-        tgt_joints = torch.cat([t['keypoints'][i] for t, (_, i) in zip(targets, indices)], dim=0) # tgt, 17, 3
-        tgt_bboxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # tgt, 4
+        tgt_joints = paddle.concat([t['keypoints'][i] for t, (_, i) in zip(targets, indices)], axis=0) # tgt, 17, 3
+        tgt_bboxes = paddle.concat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], axis=0) # tgt, 4
 
         tgt_flags = tgt_joints[..., 2]
         tgt_joints = tgt_joints[..., 0:2]
-        tgt_flags = (tgt_flags > 0) * (tgt_joints >= 0).all(dim=-1) * (tgt_joints <= 1).all(dim=-1) # zychen
+        tgt_flags = (tgt_flags > 0) * (tgt_joints >= 0).all(axis=-1) * (tgt_joints <= 1).all(axis=-1) # zychen
         tgt_wh = tgt_bboxes[..., 2:]
         tgt_areas = tgt_wh[..., 0] * tgt_wh[..., 1]
         sigmas = KPS_OKS_SIGMAS # self.sigmas
@@ -166,9 +166,9 @@ class KeypointSetCriterion(nn.Module):
         # if with_center:
         #     tgt_center = tgt_bboxes[..., 0:2]
         #     sigma_center = sigmas.mean()
-        #     tgt_joints = torch.cat([tgt_joints, tgt_center[:, None, :]], dim=1)
+        #     tgt_joints = paddle.concat([tgt_joints, tgt_center[:, None, :]], axis=1)
         #     sigmas = np.append(sigmas, np.array([sigma_center]), axis=0)
-        #     tgt_flags = torch.cat([tgt_flags, torch.ones([tgt_flags.size(0), 1]).type_as(tgt_flags)], dim=1)
+        #     tgt_flags = paddle.concat([tgt_flags, torch.ones([tgt_flags.size(0), 1]).type_as(tgt_flags)], axis=1)
 
         sigmas = torch.tensor(sigmas).type_as(tgt_joints)
         d_sq = torch.square(src_joints - tgt_joints).sum(-1)
@@ -185,11 +185,11 @@ class KeypointSetCriterion(nn.Module):
         assert 'pred_keypoints' in outputs
         idx = self._get_src_permutation_idx(indices)
         src_kps = outputs['pred_keypoints'][idx]
-        target_kps = torch.cat([t['keypoints'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_kps = paddle.concat([t['keypoints'][i] for t, (_, i) in zip(targets, indices)], axis=0)
         tgt_kps = target_kps[..., :2]
-        tgt_visible = (target_kps[..., 2] > 0) * (tgt_kps >= 0).all(dim=-1) * (tgt_kps <= 1).all(dim=-1)
+        tgt_visible = (target_kps[..., 2] > 0) * (tgt_kps >= 0).all(axis=-1) * (tgt_kps <= 1).all(axis=-1)
         if self.keypoint_reference == "relative":
-            target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+            target_boxes = paddle.concat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], axis=0)
             bbox_wh = target_boxes[..., 2:].unsqueeze(1) # nobj, 1, 2
             src_kps, tgt_kps = src_kps / bbox_wh, tgt_kps / bbox_wh
         src_loss, tgt_loss = src_kps[tgt_visible], tgt_kps[tgt_visible]
@@ -200,14 +200,14 @@ class KeypointSetCriterion(nn.Module):
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
-        batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
-        src_idx = torch.cat([src for (src, _) in indices])
+        batch_idx = paddle.concat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
+        src_idx = paddle.concat([src for (src, _) in indices])
         return batch_idx, src_idx
 
     def _get_tgt_permutation_idx(self, indices):
         # permute targets following indices
-        batch_idx = torch.cat([torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)])
-        tgt_idx = torch.cat([tgt for (_, tgt) in indices])
+        batch_idx = paddle.concat([torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)])
+        tgt_idx = paddle.concat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
     def get_loss(self, loss, outputs, targets, indices, num_boxes, num_pts):
@@ -233,18 +233,18 @@ class KeypointSetCriterion(nn.Module):
                   keypoints: ngts, 17, 3
         """
         num_boxes = sum(t["keypoints"].shape[0] for t in targets)
-        num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
+        num_boxes = paddle.to_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
         if is_dist_avail_and_initialized():
-            torch.distributed.all_reduce(num_boxes)
-        num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
+            paddle.distributed.all_reduce(num_boxes)
+        num_boxes = torch.clip(num_boxes / get_world_size(), min=1).item()
 
-        kps = torch.cat([t["keypoints"] for t in targets], dim=0)
-        kps = (kps[..., 2] > 0) * (kps[..., :2] >= 0).all(dim=-1) * (kps[..., :2] <= 1).all(dim=-1)
+        kps = paddle.concat([t["keypoints"] for t in targets], axis=0)
+        kps = (kps[..., 2] > 0) * (kps[..., :2] >= 0).all(axis=-1) * (kps[..., :2] <= 1).all(axis=-1)
         num_pts = kps.sum()
-        num_pts = torch.as_tensor(num_pts, dtype=torch.float, device=next(iter(outputs.values())).device)
+        num_pts = paddle.to_tensor(num_pts, dtype=torch.float, device=next(iter(outputs.values())).device)
         if is_dist_avail_and_initialized():
-            torch.distributed.all_reduce(num_pts)
-        num_pts = torch.clamp(num_pts / get_world_size(), min=1).item()
+            paddle.distributed.all_reduce(num_pts)
+        num_pts = torch.clip(num_pts / get_world_size(), min=1).item()
 
         # normalize term
         self.loss_normalization = {"num_box": num_boxes, "num_pts": num_pts, "mean": outputs["pred_logits"].shape[1], "none": 1}

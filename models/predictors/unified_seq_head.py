@@ -3,23 +3,31 @@
 # Copyright (c) 2022 CASIA & Sensetime. All Rights Reserved.
 # ------------------------------------------------------------------------
 import numpy as np
-import torch
-from torch import nn
-from torch.nn import functional as F
+# import torch
+from paddle import nn
+from paddle.nn import functional as F
 import math
 
+import paddle
 from util.misc import inverse_sigmoid
-from timm.models.layers import trunc_normal_
+# from timm.models.layers import trunc_normal_
 from .classifiers import build_label_classifier
 from .seq_postprocess import build_sequence_postprocess
 from ..transformer.attention_modules import DeformableDecoderLayer
-from models.ops.functions import MSDeformAttnFunction
+# from models.ops.functions import ms_deform_attn_core_paddle
 from models.losses.classwise_criterion import ClasswiseCriterion
+from ..initializer import constant_, trunc_normal_
+from functools import reduce
+import operator
 
+def unflatten(tensor, axis, unflattened_size):
+    assert tensor.shape[axis] == reduce(operator.mul, unflattened_size, 1)
+    new_shape = list(tensor.shape[:axis]) + list(unflattened_size) + list(tensor.shape[axis+1:])
+    return tensor.reshape(new_shape)
 
-class Attention(nn.Module):
+class Attention(nn.Layer):
     def __init__(self, dim, num_heads=8, dropout=0., proj=True):
-        super().__init__()
+        super(Attention, self).__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = head_dim ** -0.5
@@ -30,23 +38,25 @@ class Attention(nn.Module):
 
     def forward(self, x, pre_kv=None, attn_mask=None):
         N, B, C = x.shape
-        qkv = self.qkv(x).reshape(N, B, 3, self.num_heads, C // self.num_heads).permute(2, 1, 3, 0, 4)
+        qkv = self.qkv(x).reshape([N, B, 3, self.num_heads, C // self.num_heads]).transpose([2, 1, 3, 0, 4])
         q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
-        if pre_kv is not None:
-            k = torch.cat([pre_kv[0], k], dim=2)
-            v = torch.cat([pre_kv[1], v], dim=2)
-        pre_kv = torch.stack([k, v], dim=0)
+        if pre_kv is not None: # False
+            k = paddle.concat([pre_kv[0], k], axis=2)
+            v = paddle.concat([pre_kv[1], v], axis=2)
+        pre_kv = paddle.stack([k, v], axis=0)
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
+        # attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = (q @ k.transpose([0, 1, 3, 2])) * self.scale
 
-        if attn_mask is not None:
+        if attn_mask is not None: # False
             attn.masked_fill_(attn_mask, float('-inf'))
 
-        attn = attn.softmax(dim=-1)
+        # attn = attn.softmax(axis=-1)
+        attn = F.softmax(attn, axis=-1)
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).permute(2, 0, 1, 3).reshape(N, B, C)
+        x = (attn @ v).transpose([2, 0, 1, 3]).reshape([N, B, C])
         x = self.proj(x)
         return x, pre_kv
 
@@ -57,7 +67,7 @@ def update_reference_points_xy(output_signals, reference_points, id_step):
     if id_step < 2:
         new_reference_points = inverse_sigmoid(reference_points)
         new_reference_points[:, :, id_step] += output_signals[-1]
-        new_reference_points = new_reference_points.sigmoid()
+        new_reference_points = F.sigmoid(new_reference_points)
         return new_reference_points
     else:
         return reference_points
@@ -70,7 +80,7 @@ class UnifiedSeqHead(DeformableDecoderLayer):
         #   task_category (str: filename), args.num_classes (int)
         #   LOSS, CLASSIFIER
         #   other args as for decoder layer
-        super().__init__(args)
+        super(UnifiedSeqHead, self).__init__(args)
 
         if args.no_ffn:
             del self.ffn
@@ -82,7 +92,7 @@ class UnifiedSeqHead(DeformableDecoderLayer):
         # TODO: Number of classes
         self.classifier = build_label_classifier(args.CLASSIFIER)
         self.num_steps = args.num_steps
-        self.output_embeds = nn.ModuleList([
+        self.output_embeds = nn.LayerList([
             MLP(self.d_model, self.d_model, c_out, 1) for c_out in [1] * self.num_steps
         ])
         self.reset_parameters_as_first_head()
@@ -105,19 +115,19 @@ class UnifiedSeqHead(DeformableDecoderLayer):
 
     def reset_parameters_as_first_head(self):
         for i in range(self.num_steps):
-            nn.init.constant_(self.output_embeds[i].layers[-1].weight.data, 0)
-            nn.init.constant_(self.output_embeds[i].layers[-1].bias.data, 0. if (i < 2 or i >= 4) else -2.0)
+            constant_(self.output_embeds[i].layers[-1].weight, 0)
+            constant_(self.output_embeds[i].layers[-1].bias, 0. if (i < 2 or i >= 4) else -2.0)
 
     def reset_parameters_as_refine_head(self):
         for i in range(self.num_steps):
-            nn.init.constant_(self.output_embeds[i].layers[-1].weight.data, 0)
-            nn.init.constant_(self.output_embeds[i].layers[-1].bias.data, 0)
+            constant_(self.output_embeds[i].layers[-1].weight, 0)
+            constant_(self.output_embeds[i].layers[-1].bias, 0)
 
     def self_attn_forward(self, tgt, query_pos, **kwargs):
         # q = k = self.with_pos_embed(tgt, query_pos_self)
         bs, l, c = tgt.shape
-        tgt2, self.pre_kv = self.self_attn(tgt.view(1, bs*l, c), pre_kv=self.pre_kv)
-        return tgt2.view(bs, l, c)
+        tgt2, self.pre_kv = self.self_attn(tgt.reshape([1, bs*l, c]), pre_kv=self.pre_kv)
+        return tgt2.reshape([bs, l, c])
 
     def forward(self, feat, query_pos, reference_points, srcs, src_padding_masks, **kwargs):
         # feat: cs_all, nobj, c
@@ -129,7 +139,7 @@ class UnifiedSeqHead(DeformableDecoderLayer):
         previous_logits = kwargs.pop("previous_logits", None)
         class_vector = kwargs.pop("class_vector", None)
         bs_idx, cls_idx = kwargs.pop("bs_idx", None), kwargs.pop("cls_idx", None)
-        if kwargs.pop("rearrange", False):
+        if kwargs.pop("rearrange", False): # True
             num_steps, cls_idx, feat, class_vector, bs_idx, kwargs["src_valid_ratios"] = self.post_process.taskCategory.arrangeBySteps(cls_idx, feat, class_vector, bs_idx, kwargs["src_valid_ratios"])
         else:
             num_steps = self.post_process.taskCategory.getNumSteps(cls_idx)
@@ -159,7 +169,8 @@ class UnifiedSeqHead(DeformableDecoderLayer):
                 old_cs = feat.shape[0]
                 feat = feat[:count_needs]
                 reference_points = reference_points[:count_needs]
-                self.pre_kv = self.pre_kv.unflatten(1, (old_cs, nobj))[:, :count_needs].flatten(1,2)
+                # self.pre_kv = self.pre_kv.unflatten(1, (old_cs, nobj))[:, :count_needs].flatten(1,2)
+                self.pre_kv = unflatten(self.pre_kv, 1, (old_cs, nobj))[:, :count_needs].flatten(1, 2)
                 self.cross_attn.value = self.cross_attn.value[:count_needs]
                 kwargs["src_valid_ratios"] = kwargs["src_valid_ratios"][:count_needs]
 
@@ -183,28 +194,28 @@ class UnifiedSeqHead(DeformableDecoderLayer):
         return feat
 
     def postprocess_logits(self, outputs_logits, previous_logits, bs_idx, cls_idx):
-        if previous_logits is not None:
+        if previous_logits is not None: # True
             previous_logits = previous_logits[bs_idx, cls_idx]
             previous_logits = previous_logits.unsqueeze(-1)
-            if self.sg_previous_logits:
+            if self.sg_previous_logits: # False
                 previous_logits = previous_logits.detach()
         if self.combine_method =="none":
             return outputs_logits
         elif self.combine_method == "add":
-            return outputs_logits.sigmoid() + previous_logits.sigmoid()
+            return F.sigmoid(outputs_logits) + F.sigmoid(previous_logits)
         elif self.combine_method == "multiple":
-            return inverse_sigmoid(outputs_logits.sigmoid() * previous_logits.sigmoid())
+            return inverse_sigmoid(F.sigmoid(outputs_logits) * F.sigmoid(previous_logits))
         else:
             raise KeyError
 
 
-class MLP(nn.Module):
+class MLP(nn.Layer):
 
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
-        super().__init__()
+        super(MLP, self).__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = nn.LayerList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
 
     def forward(self, x):
         for i, layer in enumerate(self.layers):

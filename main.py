@@ -22,7 +22,7 @@ from pathlib import Path
 from functools import partial
 
 import numpy as np
-import torch
+import paddle
 import datasets
 from datasets.coco_eval import evaluate
 import util.misc as utils
@@ -30,6 +30,8 @@ from datasets import build_dataset, build_dataloader, get_coco_api_from_dataset
 from engine import getEvaluator, train_one_epoch
 from models import build_model, build_postprocessor
 from config import get_config
+from paddle.distributed import fleet
+import paddle.distributed as dist
 
 
 def get_args_parser():
@@ -48,9 +50,9 @@ def get_args_parser():
     parser.add_argument('--remove_difficult', action='store_true')
     parser.add_argument('--output_dir', default='/data/detr-workdir/r50-dc5',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--device', default='cuda',
+    parser.add_argument('--device', default='cpu',
                         help='device to use for training / testing')
-    parser.add_argument('--seed', default=42, type=int)
+    parser.add_argument('--seed', default=1107, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--auto_resume', default=False, action='store_true', help='whether to resume from last checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
@@ -63,7 +65,7 @@ def get_args_parser():
                     help='node rank for distributed training') # Add for HPC
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
     # add for dataset
-    parser.add_argument('--eval_interval', default=10, type=int)
+    parser.add_argument('--eval_interval', default=60, type=int) # TODO!TODO!TODO
     # config file
     parser.add_argument('--cfg', type=str, required=True)
     parser.add_argument(
@@ -84,8 +86,8 @@ def build_optimizer(cfg_train, model_without_ddp, steps_per_epoch=None):
                 break
         return out
 
-    for n, p in model_without_ddp.named_parameters():
-        print(n)
+    # for n, p in model_without_ddp.named_parameters():
+    #     print(n)
 
     def no_weight_decay_func(name, param):
         if len(param.shape) == 1 or name.endswith(".bias"):
@@ -107,13 +109,13 @@ def build_optimizer(cfg_train, model_without_ddp, steps_per_epoch=None):
         param_dicts.append({
             "params":
                 [p for n, p in model_without_ddp.named_parameters()
-                 if match_name_keywords(n, group_keys) and p.requires_grad and not no_weight_decay_func(n, p)],
+                 if match_name_keywords(n, group_keys) and (not p.stop_gradient) and not no_weight_decay_func(n, p)],
             "lr": cfg_train.lr * multiplier,
         })
         param_dicts.append({
             "params":
                 [p for n, p in model_without_ddp.named_parameters()
-                 if match_name_keywords(n, group_keys) and p.requires_grad and no_weight_decay_func(n, p)],
+                 if match_name_keywords(n, group_keys) and (not p.stop_gradient) and no_weight_decay_func(n, p)],
             "lr": cfg_train.lr * multiplier, "weight_decay": 0.,
         })
         except_keys += group_keys
@@ -121,72 +123,104 @@ def build_optimizer(cfg_train, model_without_ddp, steps_per_epoch=None):
     param_dicts.append({
         "params":
             [p for n, p in model_without_ddp.named_parameters()
-                if not match_name_keywords(n, except_keys) and p.requires_grad and no_weight_decay_func(n, p)],
+                if not match_name_keywords(n, except_keys) and (not p.stop_gradient) and no_weight_decay_func(n, p)],
         "lr": cfg_train.lr, "weight_decay": 0.,
     })
     param_dicts.append({
         "params":
             [p for n, p in model_without_ddp.named_parameters()
-                if not match_name_keywords(n, except_keys) and p.requires_grad and not no_weight_decay_func(n, p)],
+                if not match_name_keywords(n, except_keys) and (not p.stop_gradient) and not no_weight_decay_func(n, p)],
         "lr": cfg_train.lr,
     })
     while len(param_dicts[0]["params"]) == 0:
         param_dicts = param_dicts[1:]
 
     print("Param Distribution", [len(igroup["params"]) for igroup in param_dicts])
-    if cfg_train.sgd:
-        optimizer = torch.optim.SGD(param_dicts, lr=cfg_train.lr, momentum=0.9,
-                                    weight_decay=cfg_train.weight_decay)
-    else:
-        optimizer = torch.optim.AdamW(param_dicts, lr=cfg_train.lr,
-                                      weight_decay=cfg_train.weight_decay)
+    # if cfg_train.sgd:
+    #     optimizer = paddle.optimizer.SGD(parameters=param_dicts, learning_rate=cfg_train.lr, # momentum=0.9,
+    #                                 weight_decay=cfg_train.weight_decay)
+    # else:
+    #     optimizer = paddle.optimizer.AdamW(parameters=param_dicts, learning_rate=cfg_train.lr,
+    #                                   weight_decay=cfg_train.weight_decay)
+    # if cfg_train.sched == "OneCycle":
+    #     # lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=cfg_train.lr,
+    #     #                                                    steps_per_epoch=steps_per_epoch,
+    #     #                                                    epochs=cfg_train.epochs, pct_start=0.2)
+    #     pass
+    # elif cfg_train.sched == "Step":
+    #     lr_scheduler = paddle.optimizer.lr.StepDecay(optimizer, step_size=cfg_train.lr_drop)
+    # else:
+    #     raise KeyError
+
+    # ------ lr ------
+    base_lr = cfg_train.lr # / dist.get_world_size()
     if cfg_train.sched == "OneCycle":
-        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=cfg_train.lr,
-                                                           steps_per_epoch=steps_per_epoch,
-                                                           epochs=cfg_train.epochs, pct_start=0.2)
+        # lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=cfg_train.lr,
+        #                                                    steps_per_epoch=steps_per_epoch,
+        #                                                    epochs=cfg_train.epochs, pct_start=0.2)
+        pass
     elif cfg_train.sched == "Step":
-        lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, cfg_train.lr_drop)
+        lr_scheduler = paddle.optimizer.lr.StepDecay(learning_rate=base_lr, step_size=cfg_train.lr_drop)
+    elif cfg_train.sched == "CosineAnnealingDecay":
+        lr_scheduler = paddle.optimizer.lr.CosineAnnealingDecay(learning_rate=base_lr, 
+                                                                eta_min=cfg_train.lr,
+                                                                T_max=cfg_train.T_max)
     else:
         raise KeyError
+
+    # ------ optimizer ------
+    clip = paddle.nn.ClipGradByGlobalNorm(clip_norm=args.TRAIN.clip_max_norm) if args.TRAIN.clip_max_norm > 0 else None
+    if cfg_train.sgd:
+        optimizer = paddle.optimizer.SGD(parameters=param_dicts, learning_rate=lr_scheduler, # momentum=0.9,
+                                    weight_decay=cfg_train.weight_decay, grad_clip=clip)
+    else:
+        optimizer = paddle.optimizer.AdamW(parameters=param_dicts, learning_rate=lr_scheduler,
+                                      weight_decay=cfg_train.weight_decay, grad_clip=clip)
+
+    
     return optimizer, lr_scheduler
 
 
 def main(args):
-    utils.init_distributed_mode(args)
-    print("git:\n  {}\n".format(utils.get_sha()))
+    utils.init_distributed_mode(args) # 此处会初始化 fleet
+    # print("git:\n  {}\n".format(utils.get_sha()))
 
     if args.frozen_weights is not None:
         assert args.masks, "Frozen training is meant for segmentation only"
 
-    print(args)
+    # print(args)
 
-    device = torch.device(args.device)
+    # device = torch.device(args.device)
+    device = None
 
     # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
+    seed = args.seed
+    paddle.seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
     model = build_model(args)
-    model.to(device)
+    # model.to(device)
     postprocessors = build_postprocessor(args)
 
     model_without_ddp = model
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_parameters = sum(p.numel() for p in model.parameters() if not p.stop_gradient).numpy().item()
     print('number of params:', n_parameters)
 
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
 
-    data_loader_train, data_loader_val, sampler_train = build_dataloader(dataset_train, dataset_val, args.DATA)
+    data_loader_train, data_loader_val, sampler_train = build_dataloader(dataset_train, dataset_val, args.DATA, args.TRAIN.fleet)
     evaluate = getEvaluator(args)
 
     optimizer, lr_scheduler = build_optimizer(args.TRAIN, model_without_ddp, steps_per_epoch=len(data_loader_train))
 
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
+    # if args.distributed:
+    #     model = paddle.DataParallel(model)
+    #     model_without_ddp = model._layers
+    if args.TRAIN.fleet:
+        model = fleet.distributed_model(model)
+        optimizer = fleet.distributed_optimizer(optimizer)
 
     if args.DATA.type == "coco_panoptic":
         # We also evaluate AP during panoptic training, on original coco DS
@@ -211,43 +245,46 @@ def main(args):
 
     if args.resume:
         if args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
+            # checkpoint = paddle.hub.load_state_dict_from_url(
+            #     args.resume, map_location='cpu', check_hash=True)
+            pass
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = paddle.load(args.resume)
         if 'epoch' in checkpoint:
             print("Resuming from Epoch", checkpoint['epoch'])
         if args.MODEL.PROMPT_INDICATOR.CLASS_PROMPTS.fix_class_prompts:
             print("delete class_vector in resume model")
             del checkpoint['model']['transformer.prompt_indicator.class_prompts']
 
-        missing_keys, unexpected_keys = model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
-        unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
-        if len(missing_keys) > 0:
-            print('Missing Keys: {}'.format(missing_keys))
-        if len(unexpected_keys) > 0:
-            print('Unexpected Keys: {}'.format(unexpected_keys))
+        # missing_keys, unexpected_keys = model_without_ddp.load_dict(checkpoint['model'])
+        model_without_ddp.load_dict(checkpoint['model'])
+        # unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
+        # if len(missing_keys) > 0:
+        #     print('Missing Keys: {}'.format(missing_keys))
+        # if len(unexpected_keys) > 0:
+        #     print('Unexpected Keys: {}'.format(unexpected_keys))
+        
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            p_groups = copy.deepcopy(optimizer.param_groups)
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            for pg, pg_old in zip(optimizer.param_groups, p_groups):
+            p_groups = copy.deepcopy(optimizer._param_groups)
+            optimizer.set_state_dict(checkpoint['optimizer'])
+            for pg, pg_old in zip(optimizer._param_groups, p_groups):
                 pg['lr'] = pg_old['lr']
-                pg['initial_lr'] = pg_old['initial_lr']
+                # pg['initial_lr'] = pg_old['initial_lr']
 
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+            lr_scheduler.set_dict(checkpoint['lr_scheduler'])  # TODO!TODO!TODO # 1月29号早上取消注释
             # todo: this is a hack for doing experiment that resume from checkpoint and also modify lr scheduler (e.g., decrease lr in advance).
             args.override_resumed_lr_drop = True
             if args.override_resumed_lr_drop:
                 print('Warning: (hack) args.override_resumed_lr_drop is set to True, so args.lr_drop would override lr_drop in resumed lr_scheduler.')
                 lr_scheduler.step_size = args.TRAIN.lr_drop
-                lr_scheduler.base_lrs = list(map(lambda group: group['initial_lr'], optimizer.param_groups))
+                # lr_scheduler.base_lrs = list(map(lambda group: group['initial_lr'], optimizer._param_groups))
             lr_scheduler.step(lr_scheduler.last_epoch)
             args.start_epoch = checkpoint['epoch'] + 1
-        # check the resumed model
-        if not args.eval:
-            test_stats, coco_evaluator = evaluate(
-                model, postprocessors, data_loader_val, base_ds, device, args.output_dir, args=args.EVAL
-            )
+        # check the resumed model # TODO!TODO!TODO
+        # if not args.eval:
+        #     test_stats, coco_evaluator = evaluate(
+        #         model, postprocessors, data_loader_val, base_ds, device, args.output_dir, args=args.EVAL
+        #     )
     
     if args.eval:
         test_stats, coco_evaluator = evaluate(model, postprocessors,
@@ -265,8 +302,9 @@ def main(args):
     print(args.output_dir)
     start_time = time.time()
     training_epochs = args.TRAIN.epochs
+    amp_scaler = paddle.amp.GradScaler(init_loss_scaling=1024) if args.TRAIN.amp else None
     for epoch in range(args.start_epoch, training_epochs):
-        if args.distributed:
+        if args.distributed or args.TRAIN.fleet:
             if isinstance(sampler_train, list):
                 for s in sampler_train:
                     s.set_epoch(epoch)
@@ -274,35 +312,36 @@ def main(args):
                 sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
             model, data_loader_train, optimizer,
-            device, epoch, args.TRAIN.clip_max_norm, preprocessor=None)
+            device, epoch, args.TRAIN.clip_max_norm, preprocessor=None, amp_bool=args.TRAIN.amp, amp_scaler=amp_scaler)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
             if (epoch + 1) % args.TRAIN.lr_drop == 0 or (epoch + 1) % 10 == 0 or (epoch + 1) % args.eval_interval == 0 or epoch >= training_epochs-5:
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
             for checkpoint_path in checkpoint_paths:
-                utils.save_on_master({
+                utils.save_on_master(obj={
                     'model': model_without_ddp.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'lr_scheduler': lr_scheduler.state_dict(),
                     'epoch': epoch,
                     'args': args,
-                }, checkpoint_path)
+                }, path=checkpoint_path)
 
         if (epoch + 1) % args.eval_interval == 0 or epoch >= training_epochs-5:
-            test_stats, coco_evaluator = evaluate(
-                model, postprocessors, data_loader_val, base_ds, device, args.output_dir, args=args.EVAL
-            )
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        **{f'test_{k}': v for k, v in test_stats.items()},
-                        'epoch': epoch,
-                        'n_parameters': n_parameters}
+            pass
+            # test_stats, coco_evaluator = evaluate(
+            #     model, postprocessors, data_loader_val, base_ds, device, args.output_dir, args=args.EVAL
+            # )
+            # log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+            #             **{f'test_{k}': v for k, v in test_stats.items()},
+            #             'epoch': epoch,
+            #             'n_parameters': n_parameters}
         else:
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         'epoch': epoch,
                         'n_parameters': n_parameters}
         
-        print(args.output_dir)
+        # print(args.output_dir)
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")

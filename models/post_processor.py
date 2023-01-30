@@ -14,17 +14,17 @@
 """
 PostProcessor for Obj2Seq
 """
-import torch
-import torch.nn.functional as F
-from torch import nn
+import paddle
+import paddle.nn.functional as F
+from paddle import nn
 
 from util import box_ops
 
 
-class PostProcess(nn.Module):
+class PostProcess(nn.Layer):
     """ This module converts the model's output into the format expected by the coco api"""
 
-    @torch.no_grad()
+    @paddle.no_grad()
     def forward(self, outputs, target_sizes):
         """ Perform the computation
         Parameters:
@@ -39,16 +39,16 @@ class PostProcess(nn.Module):
         assert target_sizes.shape[1] == 2
 
         prob = out_logits.sigmoid()
-        topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
+        topk_values, topk_indexes = paddle.topk(prob.reshape(out_logits.shape[0], -1), 100, axis=1)
         scores = topk_values
         topk_boxes = topk_indexes // out_logits.shape[2]
         labels = topk_indexes % out_logits.shape[2]
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
-        boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, 4))
+        boxes = paddle.gather(boxes, 1, topk_boxes.unsqueeze(-1).tile(1, 1, 4))
 
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1)
-        scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
+        scale_fct = paddle.stack([img_w, img_h, img_w, img_h], axis=1)
         boxes = boxes * scale_fct[:, None, :]
 
         results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
@@ -56,28 +56,29 @@ class PostProcess(nn.Module):
         return results
 
 
-class MutiClassPostProcess(nn.Module):
-    @torch.no_grad()
+class MutiClassPostProcess(nn.Layer):
+    @paddle.no_grad()
     def forward(self, outputs, target_sizes):
         img_h, img_w = target_sizes.unbind(1)
-        scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1) # bs, 4
+        scale_fct = paddle.stack([img_w, img_h, img_w, img_h], axis=1) # bs, 4
 
         if "detection" in outputs:
             output = outputs["detection"]
             bs_idx, cls_idx = output["batch_index"], output["class_index"] # cs_all
             box_scale = scale_fct[bs_idx] # cs_all, 4
-            all_scores = output["pred_logits"].sigmoid()
+            all_scores = F.sigmoid(output["pred_logits"])
             nobj = all_scores.shape[-1]
             all_boxes = box_ops.box_cxcywh_to_xyxy(output["pred_boxes"]) * box_scale[:, None, :]
             results_det = []
             for id_b in bs_idx.unique():
                 out_scores = all_scores[bs_idx == id_b].flatten() # cs_all*nobj
                 out_bbox = all_boxes[bs_idx == id_b].flatten(0, 1)
-                out_labels = output['class_index'][bs_idx == id_b].unsqueeze(-1).expand(-1, nobj).flatten() # cs_all*nobj
+                out_labels = output['class_index'][bs_idx == id_b].unsqueeze(-1).expand([-1, nobj]).flatten() # cs_all*nobj
 
-                s, indices = out_scores.sort(descending=True)
+                s, indices = out_scores.sort(descending=True), out_scores.argsort(descending=True)
                 s, indices = s[:100], indices[:100]
-                results_det.append({'scores': s, 'labels': out_labels[indices], 'boxes': out_bbox[indices, :]})
+                # results_det.append({'scores': s, 'labels': out_labels[indices], 'boxes': out_bbox[indices, :]})
+                results_det.append({'scores': s, 'labels': out_labels[indices], 'boxes': out_bbox[indices]})
             return results_det
 
         if "pose" in outputs:
@@ -87,14 +88,14 @@ class MutiClassPostProcess(nn.Module):
             all_scores = output["pred_logits"].sigmoid()
             nobj = all_scores.shape[-1]
             all_keypoints = output["pred_keypoints"] * box_scale[:, None, None, :2]
-            all_keypoints = torch.cat([all_keypoints, torch.ones_like(all_keypoints)[..., :1]], dim=-1)
+            all_keypoints = paddle.concat([all_keypoints, paddle.ones_like(all_keypoints)[..., :1]], axis=-1)
             all_boxes = box_ops.box_cxcywh_to_xyxy(output["pred_boxes"]) * box_scale[:, None, :]
             results_det = []
             for id_b in bs_idx.unique():
                 out_scores = all_scores[bs_idx == id_b].flatten() # cs_all*nobj
                 out_bbox = all_boxes[bs_idx == id_b].flatten(0, 1)
                 out_keypoints = all_keypoints[bs_idx == id_b].flatten(0, 1)
-                out_labels = torch.zeros_like(out_scores, dtype=torch.long)
+                out_labels = paddle.zeros_like(out_scores, dtype=paddle.long)
 
                 s, indices = out_scores.sort(descending=True)
                 s, indices = s[:100], indices[:100]
@@ -102,8 +103,8 @@ class MutiClassPostProcess(nn.Module):
             return results_det
 
 
-class KeypointPostProcess(nn.Module):
-    @torch.no_grad()
+class KeypointPostProcess(nn.Layer):
+    @paddle.no_grad()
     def forward(self, outputs, target_sizes):
         """ Perform the computation
         Parameters:
@@ -124,19 +125,19 @@ class KeypointPostProcess(nn.Module):
         bs, num_obj = out_logits.shape
 
         scores = out_logits.sigmoid() # bs, obj
-        labels = torch.zeros_like(scores, dtype=torch.int64)
+        labels = paddle.zeros_like(scores, dtype=torch.int64)
 
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1) # bs
-        scale_fct = torch.stack([img_w, img_h], dim=1) # bs, 2
+        scale_fct = paddle.stack([img_w, img_h], axis=1) # bs, 2
         out_keypoints = out_keypoints * scale_fct[:, None, None, :] # bs, nobj, 17, 2
         ones = torch.ones_like(out_keypoints)[..., :1]
-        keypoints = torch.cat([out_keypoints, ones], dim=-1)
+        keypoints = paddle.concat([out_keypoints, ones], axis=-1)
 
         if "pred_boxes" in outputs:
             out_bbox =  outputs['pred_boxes'].squeeze(1)
             boxes = box_ops.box_cxcywh_to_xyxy(out_bbox) # b, obj, 4
-            scale_fct = torch.cat([scale_fct, scale_fct], dim=1) # bs, 4
+            scale_fct = paddle.concat([scale_fct, scale_fct], axis=1) # bs, 4
             boxes = boxes * scale_fct[:, None, :]
         else:
             boxes = None

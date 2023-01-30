@@ -4,7 +4,7 @@
 # ------------------------------------------------------------------------
 
 import json
-import torch
+import paddle
 from argparse import Namespace
 
 
@@ -32,7 +32,7 @@ class TaskCategory():
                 currentIndex += 1
                 all_cats += num_cats[currentIndex]
             self.id_to_index.append(currentIndex)
-        self.id_to_index = torch.LongTensor(self.id_to_index)
+        self.id_to_index = paddle.to_tensor(self.id_to_index, dtype=paddle.int32)
 
     def __getitem__(self, tId):
         if isinstance(tId, int):
@@ -59,11 +59,11 @@ class TaskCategory():
 
     def arrangeBySteps(self, cls_idx, *args):
         tIds = [self.id_to_index[ic] for ic in cls_idx]
-        nSteps = torch.as_tensor([self.tasks[tId].num_steps for tId in tIds])
-        nSteps, indices = nSteps.sort(descending=True)
+        nSteps = paddle.to_tensor([self.tasks[tId].num_steps for tId in tIds])
+        nSteps, indices = nSteps.sort(descending=True), nSteps.argsort(descending=True)
         return (nSteps, cls_idx[indices], *[a[indices] if a is not None else None for a in args])
 
     def getNumSteps(self, cls_idx, *args):
         tIds = [self.id_to_index[ic] for ic in cls_idx]
-        nSteps = torch.as_tensor([self.tasks[tId].num_steps for tId in tIds])
+        nSteps = paddle.to_tensor([self.tasks[tId].num_steps for tId in tIds])
         return nSteps

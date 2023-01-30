@@ -14,9 +14,9 @@
 """
 Main framework for Obj2Seq
 """
-import torch
-import torch.nn.functional as F
-from torch import nn
+import paddle
+import paddle.nn.functional as F
+from paddle import nn
 
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate,
@@ -24,9 +24,9 @@ from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
 
 from .backbone import build_backbone
 from .transformer import build_transformer
+from .initializer import xavier_uniform_, constant_
 
-
-class Obj2Seq(nn.Module):
+class Obj2Seq(nn.Layer):
     """ This is Obj2Seq, our main framework """
 
     def __init__(self, args):
@@ -34,7 +34,7 @@ class Obj2Seq(nn.Module):
         Parameters:
             args: refers _C.MODEL in config.yaml.
         """
-        super().__init__()
+        super(Obj2Seq, self).__init__()
         self.backbone = build_backbone(args.BACKBONE)
         self.transformer = build_transformer(args)
         num_feature_levels=args.BACKBONE.num_feature_levels
@@ -47,29 +47,29 @@ class Obj2Seq(nn.Module):
             for _ in range(num_backbone_outs):
                 in_channels = self.backbone.num_channels[_]
                 input_proj_list.append(nn.Sequential(
-                    nn.Conv2d(in_channels, hidden_dim, kernel_size=1),
+                    nn.Conv2D(in_channels, hidden_dim, kernel_size=1),
                     nn.GroupNorm(32, hidden_dim),
                 ))
             for _ in range(num_feature_levels - num_backbone_outs):
                 input_proj_list.append(nn.Sequential(
-                    nn.Conv2d(in_channels, hidden_dim, kernel_size=3, stride=2, padding=1),
+                    nn.Conv2D(in_channels, hidden_dim, kernel_size=3, stride=2, padding=1),
                     nn.GroupNorm(32, hidden_dim),
                 ))
                 in_channels = hidden_dim
-            self.input_proj = nn.ModuleList(input_proj_list)
+            self.input_proj = nn.LayerList(input_proj_list)
         else:
-            self.input_proj = nn.ModuleList([
+            self.input_proj = nn.LayerList([
                 nn.Sequential(
-                    nn.Conv2d(self.backbone.num_channels[0], hidden_dim, kernel_size=1),
+                    nn.Conv2D(self.backbone.num_channels[0], hidden_dim, kernel_size=1),
                     nn.GroupNorm(32, hidden_dim),
                 )])
 
         for proj in self.input_proj:
-            nn.init.xavier_uniform_(proj[0].weight, gain=1)
-            nn.init.constant_(proj[0].bias, 0)
+            xavier_uniform_(proj[0].weight, gain=1)
+            constant_(proj[0].bias, 0)
 
     def forward(self, samples: NestedTensor, targets=None):
-        """ The forward expects a NestedTensor, which consists of:
+        """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
 
@@ -102,7 +102,7 @@ class Obj2Seq(nn.Module):
                 else:
                     src = self.input_proj[l](srcs[-1])
                 m = samples.mask
-                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
+                mask = F.interpolate(m[None].cast("float32"), size=src.shape[-2:])[0]
                 srcs.append(src)
                 masks.append(mask)
 
@@ -136,6 +136,6 @@ def build_model(args):
     if len(args.MODEL.fixed_params) > 0:
         for n, p in model.named_parameters():
             if match_name_keywords(n, args.MODEL.fixed_params):
-                p.requires_grad_(False)
-
+                # p.requires_grad_(False)
+                p.stop_gradient = True
     return model

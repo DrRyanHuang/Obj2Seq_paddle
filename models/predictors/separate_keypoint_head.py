@@ -3,16 +3,16 @@
 # Copyright (c) 2022 CASIA & Sensetime. All Rights Reserved.
 # ------------------------------------------------------------------------
 import numpy as np
-import torch
-from torch import nn
-from torch.nn import functional as F
+# import torch
+from paddle import nn
+from paddle.nn import functional as F
 
 from util.misc import inverse_sigmoid
 from .classifiers import build_label_classifier
 from models.losses.e2e_keypoint_criterion import KeypointSetCriterion
 
 
-class SeparateKeypointHead(nn.Module):
+class SeparateKeypointHead(nn.Layer):
     def __init__(self, args):
         super().__init__()
         # output prediction
@@ -25,11 +25,11 @@ class SeparateKeypointHead(nn.Module):
         self.keypoint_output = args.keypoint_output
         self.keypoint_relative_ratio = args.LOSS.keypoint_relative_ratio
 
-        nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
-        nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
-        nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
-        nn.init.constant_(self.output_layer.layers[-1].weight.data, 0)
-        nn.init.constant_(self.output_layer.layers[-1].bias.data, 0)
+        nn.init.constant_(self.bbox_embed.layers[-1].weight, 0)
+        nn.init.constant_(self.bbox_embed.layers[-1].bias, 0)
+        nn.init.constant_(self.bbox_embed.layers[-1].bias[2:], -2.0)
+        nn.init.constant_(self.output_layer.layers[-1].weight, 0)
+        nn.init.constant_(self.output_layer.layers[-1].bias, 0)
 
         # for loss
         self.criterion = KeypointSetCriterion(args.LOSS)
@@ -51,10 +51,10 @@ class SeparateKeypointHead(nn.Module):
         class_vector, cls_idx = kwargs.pop("class_vector", None), kwargs.pop("cls_idx", None)
         outputs_class = self.class_embed(feat, class_vector=class_vector, cls_idx=cls_idx) # bs(, cs), obj(, num_classes)
         # TODO: Implement for poins_per_query > 1
-        feat = feat.view(bs, nobj, c)
+        feat = feat.reshape(bs, nobj, c)
         tmp = self.bbox_embed(feat) # bs, cs, obj, 4
         reference_points = reference_points.squeeze(1) # bs, nobj, 2
-        tmp_center, tmp_offsets = self.output_layer(feat).split([2, 34], dim=-1) # bs, obj, 4+2+34
+        tmp_center, tmp_offsets = self.output_layer(feat).split([2, 34], axis=-1) # bs, obj, 4+2+34
         tmp_center = tmp_center.reshape(bs, nobj, 1, 2)
         tmp_offsets = tmp_offsets.reshape(bs, nobj, 17, 2)
         # This part is for outputs_coord
@@ -63,13 +63,13 @@ class SeparateKeypointHead(nn.Module):
             tmp = tmp + reference
         else:
             assert reference.shape[-1] == 2
-            tmp = tmp + torch.cat([reference, torch.zeros_like(reference)], dim=-1)
+            tmp = tmp + paddle.concat([reference, paddle.zeros_like(reference)], axis=-1)
         outputs_coord = tmp.sigmoid()
         keypoint_coords = self.generate_keypoint_outputs(tmp_center, tmp_offsets, outputs_coord, reference_points) # bs, obj, 17, 2
         outputs = {
-            "pred_logits": outputs_class.view(bs, nobj),
-            "pred_boxes": outputs_coord.view(bs, nobj, 4),
-            "pred_keypoints": keypoint_coords.view(bs, nobj, 17, 2),
+            "pred_logits": outputs_class.reshape(bs, nobj),
+            "pred_boxes": outputs_coord.reshape(bs, nobj, 4),
+            "pred_keypoints": keypoint_coords.reshape(bs, nobj, 17, 2),
         }
 
         targets = kwargs.pop("targets", None)
@@ -79,8 +79,8 @@ class SeparateKeypointHead(nn.Module):
             "keypoints": tgt[0]["keypoints"],
         } if 0 in tgt else {
             'image_id': tgt["image_id"].item(),
-            "boxes": torch.zeros((0, 4), device=outputs_coord.device),
-            "keypoints": torch.zeros((0, 17, 3), device=outputs_coord.device),
+            "boxes": paddle.zeros((0, 4), device=outputs_coord.device),
+            "keypoints": paddle.zeros((0, 17, 3), device=outputs_coord.device),
         } for tgt in targets]
         loss_dict = self.criterion(outputs, targets)
 
@@ -95,12 +95,12 @@ class SeparateKeypointHead(nn.Module):
         return coords
 
 
-class MLP(nn.Module):
+class MLP(nn.Layer):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers, count_per_query=1):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = nn.LayerList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
 
     def forward(self, x):
         # x: bs, cs, obj, c

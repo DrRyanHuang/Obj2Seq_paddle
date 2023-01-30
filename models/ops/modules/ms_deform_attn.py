@@ -13,12 +13,11 @@ from __future__ import division
 import warnings
 import math
 
-import torch
-from torch import nn
-import torch.nn.functional as F
-from torch.nn.init import xavier_uniform_, constant_
-
-from ..functions import MSDeformAttnFunction
+import paddle
+from paddle import nn
+import paddle.nn.functional as F
+from ...initializer import constant_, xavier_uniform_
+from util.misc import masked_fill
 
 
 def _is_power_of_2(n):
@@ -27,7 +26,7 @@ def _is_power_of_2(n):
     return (n & (n-1) == 0) and n != 0
 
 
-class MSDeformAttn(nn.Module):
+class MSDeformAttn(nn.Layer):
     def __init__(self, d_model=256, n_levels=4, n_heads=8, n_points=4, no_value_proj=False):
         """
         Multi-Scale Deformable Attention Module
@@ -36,7 +35,7 @@ class MSDeformAttn(nn.Module):
         :param n_heads      number of attention heads
         :param n_points     number of sampling points per attention head per feature level
         """
-        super().__init__()
+        super(MSDeformAttn, self).__init__()
         if d_model % n_heads != 0:
             raise ValueError('d_model must be divisible by n_heads, but got {} and {}'.format(d_model, n_heads))
         _d_per_head = d_model // n_heads
@@ -60,34 +59,48 @@ class MSDeformAttn(nn.Module):
         self.value = None
 
         self._reset_parameters()
+        try:
+            # use cuda op
+            from deformable_detr_ops import ms_deformable_attn
+        except:
+            # use paddle func
+            # from .utils import deformable_attention_core_func as ms_deformable_attn
+            from ..functions import ms_deform_attn_core_paddle as ms_deformable_attn
+        self.ms_deformable_attn_core = ms_deformable_attn
 
     def _reset_parameters(self):
-        constant_(self.sampling_offsets.weight.data, 0.)
-        thetas = torch.arange(self.n_heads, dtype=torch.float32) * (2.0 * math.pi / self.n_heads)
-        grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
-        grid_init = (grid_init / grid_init.abs().max(-1, keepdim=True)[0]).view(self.n_heads, 1, 1, 2).repeat(1, self.n_levels, self.n_points, 1)
-        for i in range(self.n_points):
-            grid_init[:, :, i, :] *= i + 1
-        with torch.no_grad():
-            self.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
-        constant_(self.attention_weights.weight.data, 0.)
-        constant_(self.attention_weights.bias.data, 0.)
+        constant_(self.sampling_offsets.weight, 0.)
+        thetas = paddle.arange(self.n_heads, dtype=paddle.float32) * (2.0 * math.pi / self.n_heads)
+        grid_init = paddle.stack([thetas.cos(), thetas.sin()], -1)
+        grid_init = (grid_init / grid_init.abs().max(-1, keepdim=True)).reshape([self.n_heads, 1, 1, 2]).tile([1, self.n_levels, self.n_points, 1])
+        # for i in range(self.n_points):
+        #     grid_init[:, :, i, :] *= i + 1
+        scaling = paddle.arange(
+            1, self.n_points + 1,
+            dtype=paddle.float32).reshape([1, 1, -1, 1])
+        grid_init *= scaling
+        # with paddle.no_grad():
+        #     self.sampling_offsets.bias = nn.Parameter(grid_init.reshape(-1))
+        self.sampling_offsets.bias.set_value(grid_init.flatten())
+        constant_(self.attention_weights.weight, 0.)
+        constant_(self.attention_weights.bias, 0.)
         if not self.no_value_proj:
-            xavier_uniform_(self.value_proj.weight.data)
-            constant_(self.value_proj.bias.data, 0.)
-        xavier_uniform_(self.output_proj.weight.data)
-        constant_(self.output_proj.bias.data, 0.)
+            xavier_uniform_(self.value_proj.weight)
+            constant_(self.value_proj.bias, 0.)
+        xavier_uniform_(self.output_proj.weight)
+        constant_(self.output_proj.bias, 0.)
 
     def preprocess_value(self, input_flatten, input_padding_mask=None, cs_batch=None, bs_idx=None):
         N, Len_in, _ = input_flatten.shape
         value = self.value_proj(input_flatten)
         if input_padding_mask is not None:
-            value = value.masked_fill(input_padding_mask[..., None], float(0))
-        self.value = value.view(N, Len_in, self.n_heads, self.d_model // self.n_heads)
-        if bs_idx is not None:
+            # value = value.masked_fill(input_padding_mask[..., None], float(0))
+            value *= (1 - input_padding_mask[..., None])
+        self.value = value.reshape([N, Len_in, self.n_heads, self.d_model // self.n_heads])
+        if bs_idx is not None: # True
             self.value = self.value[bs_idx]
         elif cs_batch is not None:
-            self.value = torch.cat([
+            self.value = paddle.concat([
                 v.expand(cs ,-1, -1, -1) for cs, v in zip(cs_batch, self.value)
             ]) # cs_all, *, *, *
 
@@ -110,24 +123,26 @@ class MSDeformAttn(nn.Module):
 
             value = self.value_proj(input_flatten)
             if input_padding_mask is not None:
-                value = value.masked_fill(input_padding_mask[..., None], float(0))
-            value = value.view(N, Len_in, self.n_heads, self.d_model // self.n_heads)
+                # value = value.masked_fill(input_padding_mask[..., None], float(0))
+                # value = masked_fill(value, input_padding_mask[..., None], float(0))
+                value *= (1 - input_padding_mask[..., None])
+            value = value.reshape([N, Len_in, self.n_heads, self.d_model // self.n_heads])
 
             if cs_batch is not None:
-                value = torch.cat([
-                    v.expand(cs ,-1, -1, -1) for cs, v in zip(cs_batch, value)
+                value = paddle.concat([
+                    v.expand([cs ,-1, -1, -1]) for cs, v in zip(cs_batch, value)
                 ]) # cs_all, *, *, *
                 N = value.shape[0]
         else:
             value = self.value
             assert (input_spatial_shapes[:, 0] * input_spatial_shapes[:, 1]).sum() == value.shape[1]
 
-        sampling_offsets = self.sampling_offsets(query).view(N, Len_q, self.n_heads, self.n_levels, self.n_points, 2)
-        attention_weights = self.attention_weights(query).view(N, Len_q, self.n_heads, self.n_levels * self.n_points)
-        attention_weights = F.softmax(attention_weights, -1).view(N, Len_q, self.n_heads, self.n_levels, self.n_points)
+        sampling_offsets = self.sampling_offsets(query).reshape([N, Len_q, self.n_heads, self.n_levels, self.n_points, 2])
+        attention_weights = self.attention_weights(query).reshape([N, Len_q, self.n_heads, self.n_levels * self.n_points])
+        attention_weights = F.softmax(attention_weights, -1).reshape([N, Len_q, self.n_heads, self.n_levels, self.n_points])
         # N, Len_q, n_heads, n_levels, n_points, 2
         if reference_points.shape[-1] == 2:
-            offset_normalizer = torch.stack([input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1)
+            offset_normalizer = paddle.stack([input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1).cast("float32")
             sampling_locations = reference_points[:, :, None, :, None, :] \
                                  + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
         elif reference_points.shape[-1] == 4:
@@ -136,7 +151,7 @@ class MSDeformAttn(nn.Module):
         else:
             raise ValueError(
                 'Last dim of reference_points must be 2 or 4, but get {} instead.'.format(reference_points.shape[-1]))
-        output = MSDeformAttnFunction.apply(
-            value, input_spatial_shapes, input_level_start_index, sampling_locations, attention_weights, self.im2col_step)
+        output = self.ms_deformable_attn_core(
+            value, input_spatial_shapes, input_level_start_index, sampling_locations, attention_weights)
         output = self.output_proj(output)
         return output

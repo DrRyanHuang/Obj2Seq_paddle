@@ -20,7 +20,7 @@ import sys
 import numpy as np
 from typing import Iterable
 
-import torch
+import paddle
 import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
@@ -33,12 +33,17 @@ def convert_to_device(src, device):
         return [convert_to_device(item, device) for item in src]
     elif isinstance(src, dict):
         return {k: convert_to_device(v, device) for k, v in src.items()}
-    elif isinstance(src, torch.Tensor):
-        return src.to(device)
+    elif isinstance(src, paddle.Tensor):
+        return src
+    elif isinstance(src, int):
+        return src
+    else:
+        raise ValueError()
 
 
-def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, max_norm: float = 0, preprocessor=None):
+def train_one_epoch(model: paddle.nn.Layer, data_loader: Iterable, optimizer: paddle.optimizer.Optimizer,
+                    device: None, 
+                    epoch: int, max_norm: float = 0, preprocessor=None, amp_bool=False, amp_scaler=None):
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -47,7 +52,7 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: to
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 20
 
-    prefetcher = data_prefetcher(data_loader, device, prefetch=True)
+    prefetcher = data_prefetcher(data_loader, device, prefetch=False)
     samples, targets = prefetcher.next()
 
     # for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
@@ -55,8 +60,13 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: to
         if preprocessor is not None:
             samples, targets = preprocessor(samples, targets)
 
-        outputs, loss_dict = model(samples, targets)
+        with paddle.amp.auto_cast(enable=amp_bool):
+            outputs, loss_dict = model(samples, targets)
         losses = sum(loss_dict[k] for k in loss_dict.keys())
+        
+        # # -------- only train prompt indicator --------
+        # loss_dict_prompt_indicator = {'cls_asl': loss_dict.get('cls_asl'), 'cls_asl_0': loss_dict.get('cls_asl_0')}
+        # losses = sum(loss_dict_prompt_indicator[k] for k in loss_dict_prompt_indicator.keys()) * 50
 
         # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
@@ -72,18 +82,27 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: to
             print(loss_dict_reduced)
             sys.exit(1)
 
-        optimizer.zero_grad()
-        losses.backward()
-        if max_norm > 0:
-            grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        if not amp_bool:
+            losses.backward()
+            optimizer.step()
+            optimizer.clear_gradients()
         else:
-            grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
-        optimizer.step()
+            scaled = amp_scaler.scale(losses)
+            scaled.backward()
+            amp_scaler.step(optimizer)
+            amp_scaler.update()
+            optimizer.clear_grad(set_to_zero=False)
+
+        # if max_norm > 0:
+        #     grad_total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        # else:
+            # grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
+        grad_total_norm = utils.get_total_grad_norm(model.parameters(), max_norm)
 
         metric_logger.update(loss=loss_value, det_loss=det_loss, **loss_dict_reduced)
         # metric_logger.update(loss=loss_value)
         # metric_logger.update(class_error=loss_dict_reduced['class_error'])
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        metric_logger.update(lr=optimizer._param_groups[0]["lr"])
         metric_logger.update(grad_norm=grad_total_norm)
 
         samples, targets = prefetcher.next()
@@ -93,7 +112,7 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: to
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-@torch.no_grad()
+@paddle.no_grad()
 def evaluate_coco(model, postprocessor, data_loader, base_ds, device, output_dir, args=None):
     model.eval()
 
@@ -116,11 +135,11 @@ def evaluate_coco(model, postprocessor, data_loader, base_ds, device, output_dir
             label_logits = outputs["cls_label_logits"]
             label_probs = label_logits.sigmoid()
             # target_vector
-            target_onehot = torch.zeros(label_probs.shape)
+            target_onehot = paddle.zeros(label_probs.shape)
             for i_target, tgt in enumerate(targets):
                 target_onehot[i_target, tgt["class_label"]] = 1
 
-            _item = torch.cat((label_probs.detach().cpu(), target_onehot), 1)
+            _item = paddle.concat((label_probs.detach().cpu(), target_onehot), 1)
             saved_data.append(_item)
         # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
@@ -130,9 +149,9 @@ def evaluate_coco(model, postprocessor, data_loader, base_ds, device, output_dir
         det_loss  = sum(loss_dict_reduced[k] for k in loss_dict_reduced.keys() if 'kps' not in k).item()
         metric_logger.update(loss=losses_reduced, det_loss=det_loss, **loss_dict_reduced)
 
-        orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
+        orig_target_sizes = paddle.stack([t["orig_size"] for t in targets], axis=0)
         results = postprocessor(outputs, orig_target_sizes)
-        res = {tgt["image_id"].item(): output for tgt, output in zip(targets, results)}
+        res = {tgt["image_id"]: output for tgt, output in zip(targets, results)}
         if coco_evaluator is not None:
             coco_evaluator.update(res)
 
@@ -140,18 +159,18 @@ def evaluate_coco(model, postprocessor, data_loader, base_ds, device, output_dir
     if False:
         mtl_dir = os.path.join(output_dir, "mtl")
         indices_dict = model.module.transformer.object_decoder.detect_head[-1].criterion.set_criterion.indices_dict
-        torch.save(indices_dict, os.path.join(mtl_dir, f'saved_dict_{utils.get_rank()}.pth'))
+        paddle.save(indices_dict, os.path.join(mtl_dir, f'saved_dict_{utils.get_rank()}.pth'))
 
     # calculate mAP
     if len(saved_data) > 0:
         mtl_dir = os.path.join(output_dir, "mtl")
         if not os.path.exists(mtl_dir):
             os.mkdir(mtl_dir)
-        saved_data = torch.cat(saved_data, 0).numpy()
+        saved_data = paddle.concat(saved_data, 0).numpy()
         saved_name = 'saved_data_tmp.{}.txt'.format(utils.get_rank())
         np.savetxt(os.path.join(mtl_dir, saved_name), saved_data)
         if utils.get_world_size() > 1:
-            torch.distributed.barrier()
+            paddle.distributed.barrier()
 
         if utils.get_rank() == 0:
             print("Calculating MTL mAP:")
@@ -199,7 +218,7 @@ def evaluate_coco(model, postprocessor, data_loader, base_ds, device, output_dir
 
 
 
-@torch.no_grad()
+@paddle.no_grad()
 def evaluate_coco_mtl(model, postprocessor, data_loader, base_ds, device, output_dir, args=None):
     model.eval()
 
@@ -220,7 +239,7 @@ def evaluate_coco_mtl(model, postprocessor, data_loader, base_ds, device, output
             # target_vector
             target_onehot = targets.cpu()
 
-            _item = torch.cat((label_probs.detach().cpu(), target_onehot), 1)
+            _item = paddle.concat((label_probs.detach().cpu(), target_onehot), 1)
             saved_data.append(_item)
         # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
@@ -234,11 +253,11 @@ def evaluate_coco_mtl(model, postprocessor, data_loader, base_ds, device, output
         mtl_dir = os.path.join(output_dir, "mtl")
         if not os.path.exists(mtl_dir):
             os.mkdir(mtl_dir)
-        saved_data = torch.cat(saved_data, 0).numpy()
+        saved_data = paddle.concat(saved_data, 0).numpy()
         saved_name = 'saved_data_tmp.{}.txt'.format(utils.get_rank())
         np.savetxt(os.path.join(mtl_dir, saved_name), saved_data)
         if utils.get_world_size() > 1:
-            torch.distributed.barrier()
+            paddle.distributed.barrier()
 
         if utils.get_rank() == 0:
             print("Calculating MTL mAP:")
@@ -261,8 +280,8 @@ def evaluate_coco_mtl(model, postprocessor, data_loader, base_ds, device, output
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, None
 
 
-from timm.utils import accuracy
-@torch.no_grad()
+# from timm.utils import accuracy
+@paddle.no_grad()
 def evaluate_imnet(model, postprocessors=None, data_loader=None, base_ds=None, device=None, output_dir=None, save_json=False):
     criterion = torch.nn.CrossEntropyLoss()
 

@@ -11,7 +11,7 @@
 # Modified from DETR (https://github.com/facebookresearch/detr)
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 # ------------------------------------------------------------------------
-import torch.utils.data
+# import torch.utils.data
 from .torchvision_datasets import CocoDetection
 from .dataloader import build_dataloader
 
@@ -23,11 +23,11 @@ from .imnet import build_dataset as build_imnet
 
 
 def get_coco_api_from_dataset(dataset):
-    for _ in range(10):
-        # if isinstance(dataset, torchvision.datasets.CocoDetection):
-        #     break
-        if isinstance(dataset, torch.utils.data.Subset):
-            dataset = dataset.dataset
+    # for _ in range(10):
+    #     # if isinstance(dataset, torchvision.datasets.CocoDetection):
+    #     #     break
+    #     if isinstance(dataset, torch.utils.data.Subset):
+    #         dataset = dataset.dataset
     if isinstance(dataset, CocoDetection):
         return dataset.coco
 

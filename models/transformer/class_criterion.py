@@ -3,17 +3,17 @@
 # Copyright (c) 2022 CASIA & Sensetime. All Rights Reserved.
 # ------------------------------------------------------------------------
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import paddle
+import paddle.nn as nn
+import paddle.nn.functional as F
 
 from models.losses import build_asymmetricloss
 from util.misc import get_world_size, is_dist_avail_and_initialized
 
 
-class ClassDecoderCriterion(nn.Module):
+class ClassDecoderCriterion(nn.Layer):
     def __init__(self, args):
-        super().__init__()
+        super(ClassDecoderCriterion, self).__init__()
         self.losses = args.losses
         self.loss_weights = {
             "asl": args.asl_loss_weight,
@@ -27,8 +27,8 @@ class ClassDecoderCriterion(nn.Module):
 
     def prepare_targets(self, outputs, targets):
         return {
-            "multi_label_onehot": torch.stack([t["multi_label_onehot"] for t in targets], dim=0),
-            "multi_label_weights": torch.stack([t["multi_label_weights"] for t in targets], dim=0),
+            "multi_label_onehot": paddle.stack([t["multi_label_onehot"] for t in targets], axis=0),
+            "multi_label_weights": paddle.stack([t["multi_label_weights"] for t in targets], axis=0),
         }
 
     def forward(self, outputs, aux_outputs, targets):

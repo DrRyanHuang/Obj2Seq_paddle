@@ -13,16 +13,17 @@
 # ------------------------------------------------------------------------
 import copy
 
-import torch
-import torch.nn.functional as F
-from torch import nn
+import paddle
+import paddle.nn.functional as F
+from paddle import nn
 
 from models.ops.modules import MSDeformAttn
+from .multiheadattention import nnMultiheadAttention
 
 
-class BasicEncoderLayer(nn.Module):
+class BasicEncoderLayer(nn.Layer):
     def __init__(self, args):
-        super().__init__()
+        super(BasicEncoderLayer, self).__init__()
         self.d_model = args.hidden_dim
         self.normalize_before = args.pre_norm
         self.build_self_attn(args)
@@ -79,9 +80,9 @@ class DeformableEncoderLayer(BasicEncoderLayer):
         return src2
 
 
-class BasicDecoderLayer(nn.Module):
+class BasicDecoderLayer(nn.Layer):
     def __init__(self, args):
-        super().__init__()
+        super(BasicDecoderLayer, self).__init__()
         self.d_model = args.hidden_dim
         self.n_heads = args.nheads
         self.normalize_before = args.pre_norm
@@ -94,7 +95,8 @@ class BasicDecoderLayer(nn.Module):
         # self attention
         self.self_attn = not args.no_self_attn
         if self.self_attn:
-            self.self_attn = nn.MultiheadAttention(self.d_model, self.n_heads, dropout=args.dropout)
+            # self.self_attn = nn.MultiHeadAttention(self.d_model, self.n_heads, dropout=args.dropout)
+            self.self_attn = nnMultiheadAttention(self.d_model, self.n_heads, dropout=args.dropout)
             self.dropout2 = nn.Dropout(args.self_attn_dropout)
             self.norm2 = nn.LayerNorm(self.d_model)
 
@@ -106,13 +108,14 @@ class BasicDecoderLayer(nn.Module):
         return tensor if pos is None else tensor + pos
 
     def self_attn_forward(self, tgt, query_pos, **kwargs):
-        if query_pos is not None and query_pos.shape[0] != tgt.shape[0]:
+        if query_pos is not None and query_pos.shape[0] != tgt.shape[0]: # False
             cs = tgt.shape[0] // query_pos.shape[0]
-            query_pos_self = query_pos.repeat_interleave(repeats=cs, dim=0)
+            query_pos_self = query_pos.repeat_interleave(repeats=cs, axis=0)
         else:
             query_pos_self = query_pos
         q = k = self.with_pos_embed(tgt, query_pos_self)
-        tgt2 = self.self_attn(q.transpose(0, 1), k.transpose(0, 1), tgt.transpose(0, 1))[0].transpose(0, 1)
+        # tgt2 = self.self_attn(q.transpose(0, 1), k.transpose(0, 1), tgt.transpose(0, 1))[0].transpose(0, 1)
+        tgt2 = self.self_attn(q.transpose([1, 0, 2]), k.transpose([1, 0, 2]), tgt.transpose([1, 0, 2]))[0].transpose([1, 0, 2])
         return tgt2
 
     def forward_post(self, tgt, query_pos, **kwargs):
@@ -155,7 +158,8 @@ class BasicDecoderLayer(nn.Module):
 
 class MultiHeadDecoderLayer(BasicDecoderLayer):
     def build_cross_attn(self, args):
-        self.cross_attn = nn.MultiheadAttention(self.d_model, self.n_heads, dropout=args.dropout)
+        # self.cross_attn = nn.MultiheadAttention(self.d_model, self.n_heads, dropout=args.dropout)
+        self.cross_attn = nnMultiheadAttention(self.d_model, self.n_heads, dropout=args.dropout)
 
     def cross_attn_forward(self, tgt, query_pos, **kwargs):
         # tgt: 
@@ -165,16 +169,17 @@ class MultiHeadDecoderLayer(BasicDecoderLayer):
         srcs = kwargs["srcs"]
         bs = srcs.shape[0]
         if bs_all > bs:
-            tgt = tgt.view(bs, -1, c)
+            tgt = tgt.reshape(bs, -1, c)
             cs = bs_all // bs
 
         src_padding_masks = kwargs.pop("src_padding_masks")
         posemb_2d = kwargs.pop("posemb_2d", 0)
-        query_pos = torch.zeros_like(tgt) if query_pos is None else query_pos.repeat(1,cs,1)
-        tgt2 = self.cross_attn((tgt + query_pos).transpose(0, 1),
-                                (srcs + posemb_2d).reshape(bs, -1, c).transpose(0,1),
-                                srcs.reshape(bs, -1, c).transpose(0, 1), key_padding_mask=src_padding_masks.reshape(bs, -1))[0].transpose(0,1)
-        return tgt2.reshape(bs_all, seq, c)
+        query_pos = paddle.zeros_like(tgt) if query_pos is None else query_pos.tile([1, cs, 1])
+        tgt2 = self.cross_attn((tgt + query_pos).transpose([1, 0, 2]),
+                                (srcs + posemb_2d).reshape([bs, -1, c]).transpose([1, 0, 2]),
+                                srcs.reshape([bs, -1, c]).transpose([1, 0, 2]), 
+                                key_padding_mask=src_padding_masks.reshape([bs, -1]))[0].transpose([1, 0, 2])
+        return tgt2
 
     def forward(self, tgt, query_pos, reference_points, srcs, src_padding_masks, **kwargs):
         return super().forward(tgt, query_pos, srcs=srcs, src_padding_masks=src_padding_masks, **kwargs)
@@ -203,22 +208,22 @@ class DeformableDecoderLayer(BasicDecoderLayer):
     def forward(self, tgt, query_pos, reference_points, srcs, src_padding_masks, **kwargs):
         # reference_points: bs / bs_all, seq, 2 or 4
         src_valid_ratios = kwargs.pop("src_valid_ratios") # bs, level, 2
-        if reference_points.shape[-1] == 4:
-            src_valid_ratios = torch.cat([src_valid_ratios, src_valid_ratios], dim=-1)
+        if reference_points.shape[-1] == 4: # False
+            src_valid_ratios = paddle.concat([src_valid_ratios, src_valid_ratios], axis=-1)
         # if the number of reference_points and number of src_valid_ratios not match.
         # Expand and repeat for them
-        if src_valid_ratios.shape[0] != reference_points.shape[0]:
+        if src_valid_ratios.shape[0] != reference_points.shape[0]: # False
             repeat_times = (reference_points.shape[0] // src_valid_ratios.shape[0])
-            src_valid_ratios = src_valid_ratios.repeat_interleave(repeat_times, dim=0)
+            src_valid_ratios = src_valid_ratios.repeat_interleave(repeat_times, axis=0)
         src_valid_ratios = src_valid_ratios[:, None] if reference_points.dim() == 3 else src_valid_ratios[:, None, None]
         reference_points_input = reference_points[..., None, :] * src_valid_ratios
         return super().forward(tgt, query_pos, reference_points=reference_points_input, srcs=srcs, src_padding_masks=src_padding_masks, **kwargs)
 
 
-class FFN(nn.Module):
+class FFN(nn.Layer):
 
     def __init__(self, d_model=256, d_ffn=1024, dropout=0., activation='relu', normalize_before=False):
-        super().__init__()
+        super(FFN, self).__init__()
         self.linear1 = nn.Linear(d_model, d_ffn)
         self.activation = _get_activation_fn(activation)
         self.dropout2 = nn.Dropout(dropout)
@@ -246,7 +251,7 @@ class FFN(nn.Module):
 
 
 def _get_clones(module, N):
-    return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
+    return nn.LayerList([copy.deepcopy(module) for i in range(N)])
 
 
 def _get_activation_fn(activation):

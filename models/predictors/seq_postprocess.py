@@ -3,16 +3,17 @@
 # Copyright (c) 2022 CASIA & Sensetime. All Rights Reserved.
 # ------------------------------------------------------------------------
 
-import torch
-import torch.nn as nn
+import paddle
+import paddle.nn as nn
+import paddle.nn.functional as F
 
 from util.misc import inverse_sigmoid
 from util.task_category import TaskCategory
 
 
-class DetPoseProcess(nn.Module):
+class DetPoseProcess(nn.Layer):
     def __init__(self, args):
-        super().__init__()
+        super(DetPoseProcess, self).__init__()
         self.taskCategory = TaskCategory(args.task_category, args.num_classes)
         self.postprocessors = {
             "detection": self.post_process_detection,
@@ -30,10 +31,10 @@ class DetPoseProcess(nn.Module):
             cls_idx: Tensor( cs_all )
         """
         cs_all, nobj = pred_logits.shape
-        if cls_idx is None:
+        if cls_idx is None: # False
             # assert cs == 1, "Only 1 class is supported without class indexes."
-            bs_idx = torch.arange(bs)
-            cls_idx = torch.zeros(bs, dtype=torch.long)
+            bs_idx = paddle.arange(bs)
+            cls_idx = paddle.zeros([bs], dtype=paddle.int32)
         taskInfos = self.rearrange_by_task(signals, reference_points, bs_idx, cls_idx)
         outputs = {}
         for tId in taskInfos:
@@ -52,9 +53,9 @@ class DetPoseProcess(nn.Module):
         taskInfos = self.taskCategory.getTaskCorrespondingIds(bs_idx, cls_idx)
         for tId, taskInfo in taskInfos.items():
             steps = self.taskCategory.tasks[tId].num_steps
-            taskInfo["feats"] = torch.stack(
+            taskInfo["feats"] = paddle.stack(
                 [sgn[taskInfo["indexes"][:sgn.shape[0]]] for sgn in signals[:steps]],
-                dim=-1
+                axis=-1
             )
             taskInfo["reference_points"] = reference_points[taskInfo["indexes"]]
         return taskInfos
@@ -64,7 +65,7 @@ class DetPoseProcess(nn.Module):
             if key == "pred_logits":
                 continue
             elif key in outputs:
-                outputs[key] = torch.cat([outputs[key], output_per_task[key]], dim=1)
+                outputs[key] = paddle.concat([outputs[key], output_per_task[key]], axis=1)
             else:
                 outputs[key] = output_per_task[key]
         return outputs
@@ -72,7 +73,7 @@ class DetPoseProcess(nn.Module):
     def post_process_detection(self, signals, reference_points):
         reference = inverse_sigmoid(reference_points) # bs, cs, nobj, 2
         signals[..., :reference.shape[-1]] += reference
-        boxes = signals[..., :4].sigmoid()
+        boxes = F.sigmoid(signals[..., :4])
         return {"pred_boxes": boxes}
 
     def post_process_pose(self, signals, reference_points):

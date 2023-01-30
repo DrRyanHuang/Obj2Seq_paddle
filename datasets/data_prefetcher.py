@@ -5,15 +5,18 @@
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
 # ------------------------------------------------------------------------
 
-import torch
+import paddle
 
-def item_cuda(item, device):
+def item_cuda(item, device, white_list=[]):
     if isinstance(item, list):
         return [item_cuda(i, device) for i in item]
     elif isinstance(item, dict):
-        return {k: item_cuda(v, device) for k, v in item.items()}
-    elif isinstance(item, torch.Tensor):
-        return item.to(device, non_blocking=True)
+        return {k: item_cuda(v, device) for k, v in item.items() if k not in white_list}
+    elif isinstance(item, paddle.Tensor):
+        # return item.to(device, non_blocking=True)
+        return paddle.to_tensor(item)
+    elif isinstance(item, int):
+        return item
     else:
         raise TypeError
 
@@ -23,12 +26,13 @@ def to_cuda(samples, targets, device):
     return samples, targets
 
 class data_prefetcher():
-    def __init__(self, loader, device, prefetch=True):
+    def __init__(self, loader, device, prefetch=False):
         self.loader = iter(loader)
         self.prefetch = prefetch
         self.device = device
-        if prefetch and self.device=='cuda':
-            self.stream = torch.cuda.Stream()
+        # if prefetch and self.device=='cuda':
+        if prefetch:
+            self.stream = paddle.device.cuda.Stream()
             self.preload()
 
     def preload(self):
@@ -45,7 +49,7 @@ class data_prefetcher():
         # Need to make sure the memory allocated for next_* is not still in use by the main stream
         # at the time we start copying to next_*:
         # self.stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(self.stream):
+        with paddle.device.cuda.stream_guard(self.stream):
             self.next_samples, self.next_targets = to_cuda(self.next_samples, self.next_targets, self.device)
             # more code for the alternative if record_stream() doesn't work:
             # copy_ will record the use of the pinned source tensor in this side stream.
@@ -60,16 +64,17 @@ class data_prefetcher():
             # else:
 
     def next(self):
-        if self.prefetch and self.device=='cuda':
-            torch.cuda.current_stream().wait_stream(self.stream)
+        # if self.prefetch and self.device=='cuda':
+        if self.prefetch:
+            paddle.device.cuda.current_stream().wait_stream(self.stream)
             samples = self.next_samples
             targets = self.next_targets
-            if samples is not None:
-                samples.record_stream(torch.cuda.current_stream())
-            if targets is not None:
-                for t in targets:
-                    for k, v in t.items():
-                        v.record_stream(torch.cuda.current_stream())
+            # if samples is not None:
+            #     samples.record_stream(paddle.device.cuda.current_stream())
+            # if targets is not None:
+            #     for t in targets:
+            #         for k, v in t.items():
+            #             v.record_stream(paddle.device.cuda.current_stream())
             self.preload()
         else:
             try:

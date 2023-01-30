@@ -1,10 +1,10 @@
-import torch
+# import torch
 from collections import OrderedDict
 import json
 
 src_ckpt = torch.load("r50_deformable_detr-checkpoint.pth")["model"]
 json_file = json.load(open("/home/coco/annotations/instances_val2017.json"))
-cls_idx = torch.as_tensor([a["id"] for a in json_file["categories"]])
+cls_idx = paddle.to_tensor([a["id"] for a in json_file["categories"]])
 
 new_ckpt = OrderedDict()
 for key, value in src_ckpt.items():

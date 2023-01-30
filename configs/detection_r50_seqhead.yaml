@@ -11,9 +11,10 @@ MODEL:
   OBJECT_DECODER:
     HEAD:
       type: SeqHead
-      combine_method: multiple
+      combine_method: none
 TRAIN:
   lr: 2e-4
+  # lr: 5e-5
   lr_groups: [["backbone", "reference_points", "sampling_offsets"]]
   lr_mults: [0.1]
 

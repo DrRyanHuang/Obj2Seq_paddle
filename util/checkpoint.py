@@ -6,17 +6,17 @@ import time
 import warnings
 from collections import OrderedDict
 
-import torch
-import torchvision
-from torch.optim import Optimizer
-from torch.utils import model_zoo
-from torch.nn import functional as F
+import paddle
+# import torchvision
+# from torch.optim import Optimizer
+# from torch.utils import model_zoo
+from paddle.nn import functional as F
 
 
 
 def load_state_dict(module, state_dict, strict=False, logger=None):
     """Load state_dict to a module.
-    This method is modified from :meth:`torch.nn.Module.load_state_dict`.
+    This method is modified from :meth:`torch.nn.Layer.load_state_dict`.
     Default value for ``strict`` is set to ``False`` and the message for
     param mismatch will be shown even if strict is False.
     Args:
@@ -24,7 +24,7 @@ def load_state_dict(module, state_dict, strict=False, logger=None):
         state_dict (OrderedDict): Weights.
         strict (bool): whether to strictly enforce that the keys
             in :attr:`state_dict` match the keys returned by this module's
-            :meth:`~torch.nn.Module.state_dict` function. Default: ``False``.
+            :meth:`~torch.nn.Layer.state_dict` function. Default: ``False``.
         logger (:obj:`logging.Logger`, optional): Logger to log the error
             message. If not specified, print function will be used.
     """
@@ -40,7 +40,7 @@ def load_state_dict(module, state_dict, strict=False, logger=None):
     # use _load_from_state_dict to enable checkpoint version control
     def load(module, prefix=''):
         # recursively check parallel module in case that the model has a
-        # complicated structure, e.g., nn.Module(nn.Module(DDP))
+        # complicated structure, e.g., nn.Layer(nn.Layer(DDP))
         #if is_module_wrapper(module):
         #    module = module.module
         local_metadata = {} if metadata is None else metadata.get(
@@ -67,7 +67,7 @@ def load_state_dict(module, state_dict, strict=False, logger=None):
         err_msg.append(
             f'missing keys in source state_dict: {", ".join(missing_keys)}\n')
 
-    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    rank = paddle.distributed.get_rank() if paddle.distributed.is_initialized() else 0
     if len(err_msg) > 0 and rank == 0:
         err_msg.insert(
             0, 'The model and loaded state dict do not match exactly\n')
@@ -144,7 +144,7 @@ def load_checkpoint(model,
         if N1 != N2 or C1 != C2 or L != H*W:
             logger.warning("Error in loading absolute_pos_embed, pass")
         else:
-            state_dict['absolute_pos_embed'] = absolute_pos_embed.view(N2, H, W, C2).permute(0, 3, 1, 2)
+            state_dict['absolute_pos_embed'] = absolute_pos_embed.reshape(N2, H, W, C2).permute(0, 3, 1, 2)
 
     # interpolate position bias table if needed
     relative_position_bias_table_keys = [k for k in state_dict.keys() if "relative_position_bias_table" in k]
@@ -160,9 +160,9 @@ def load_checkpoint(model,
                 S1 = int(L1 ** 0.5)
                 S2 = int(L2 ** 0.5)
                 table_pretrained_resized = F.interpolate(
-                     table_pretrained.permute(1, 0).view(1, nH1, S1, S1),
+                     table_pretrained.permute(1, 0).reshape(1, nH1, S1, S1),
                      size=(S2, S2), mode='bicubic')
-                state_dict[table_key] = table_pretrained_resized.view(nH2, L2).permute(1, 0)
+                state_dict[table_key] = table_pretrained_resized.reshape(nH2, L2).permute(1, 0)
 
     # load state_dict
     load_state_dict(model, state_dict, strict, logger)

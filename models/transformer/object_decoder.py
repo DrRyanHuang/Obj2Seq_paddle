@@ -14,18 +14,19 @@
 import math
 import numpy as np
 
-import torch
-from torch import nn
-import torch.nn.functional as F
+import paddle
+from paddle import nn
+import paddle.nn.functional as F
+from ..initializer import uniform_, xavier_uniform_, constant_
 
 from util.misc import inverse_sigmoid
 
 from .attention_modules import DeformableDecoderLayer, _get_clones
 from ..predictors import build_detect_predictor
 
-class ObjectDecoder(nn.Module):
+class ObjectDecoder(nn.Layer):
     def __init__(self, d_model=256, args=None):
-        super().__init__()
+        super(ObjectDecoder, self).__init__()
         self.d_model = d_model
         self.num_layers = args.num_layers
         self.num_position = args.num_query_position
@@ -48,18 +49,18 @@ class ObjectDecoder(nn.Module):
             for head in self.detect_head[1:]:
                 head.reset_parameters_as_refine_head()
         else:
-            self.detect_head = nn.ModuleList([self.detect_head for _ in range(self.num_layers)])
+            self.detect_head = nn.LayerList([self.detect_head for _ in range(self.num_layers)])
 
     def _init_reference_points(self, args):
         self.spatial_prior=args.spatial_prior
         if self.spatial_prior == "learned":
             self.position = nn.Embedding(self.num_position, 2)
-            nn.init.uniform_(self.position.weight.data, 0, 1)
+            uniform_(self.position.weight, 0, 1)
         elif self.spatial_prior == "sigmoid":
             self.position = nn.Embedding(self.num_position, self.d_model)
             self.reference_points = nn.Linear(self.d_model, 2)
-            nn.init.xavier_uniform_(self.reference_points.weight.data, gain=1.0)
-            nn.init.constant_(self.reference_points.bias.data, 0.)
+            xavier_uniform_(self.reference_points.weight, gain=1.0)
+            constant_(self.reference_points.bias, 0.)
         self.with_query_pos_embed = args.with_query_pos_embed
 
     def forward(self, srcs, mask, targets=None, additional_info={}, kwargs={}):
@@ -72,8 +73,8 @@ class ObjectDecoder(nn.Module):
         previous_logits = additional_info.pop("previous_logits", None)
 
         bs = srcs.shape[0]
-        bs_idx = additional_info.pop("bs_idx", torch.arange(bs))
-        cls_idx = additional_info.pop("cls_idx", torch.zeros(bs, dtype=torch.long))
+        bs_idx = additional_info.pop("bs_idx", paddle.arange(bs))
+        cls_idx = additional_info.pop("cls_idx", paddle.zeros([bs], dtype=paddle.int32))
 
         # modify srcs
         cs_batch = [(bs_idx==i).sum().item() for i in range(bs)]
@@ -84,8 +85,8 @@ class ObjectDecoder(nn.Module):
         reference_points, query_pos_embed = self.get_reference_points(cs_all)
 
         # modify kwargs
-        kwargs["src_valid_ratios"] = torch.cat([
-            vs.expand(cs ,-1, -1) for cs, vs in zip(cs_batch, kwargs["src_valid_ratios"])
+        kwargs["src_valid_ratios"] = paddle.concat([
+            vs.expand([cs ,-1, -1]) for cs, vs in zip(cs_batch, kwargs["src_valid_ratios"])
         ])
         kwargs["cs_batch"] = cs_batch
 
@@ -119,7 +120,7 @@ class ObjectDecoder(nn.Module):
     def get_reference_points(self, bs):
         # Generate srcs
         if self.spatial_prior == "learned":
-            reference_points = self.position.weight.unsqueeze(0).repeat(bs, 1, 1)
+            reference_points = self.position.weight.unsqueeze(0).tile([bs, 1, 1])
             query_embed = None
         elif self.spatial_prior == "grid":
             nx=ny=round(math.sqrt(self.num_position))
@@ -127,12 +128,12 @@ class ObjectDecoder(nn.Module):
             x = (torch.arange(nx) + 0.5) / nx
             y = (torch.arange(ny) + 0.5) / ny
             xy=torch.meshgrid(x,y)
-            reference_points=torch.cat([xy[0].reshape(-1)[...,None],xy[1].reshape(-1)[...,None]],-1).cuda()
-            reference_points = reference_points.unsqueeze(0).repeat(bs, 1, 1)
+            reference_points=paddle.concat([xy[0].reshape(-1)[...,None],xy[1].reshape(-1)[...,None]],-1).cuda()
+            reference_points = reference_points.unsqueeze(0).tile(bs, 1, 1)
             query_embed = None
         elif self.spatial_prior == "sigmoid":
-            query_embed = self.position.weight.unsqueeze(0).expand(bs, -1, -1)
-            reference_points = self.reference_points(query_embed).sigmoid()
+            query_embed = self.position.weight.unsqueeze(0).expand([bs, -1, -1])
+            reference_points = F.sigmoid(self.reference_points(query_embed))
             if not self.with_query_pos_embed:
                 query_embed = None
         else:
@@ -143,13 +144,13 @@ class ObjectDecoder(nn.Module):
         c = self.d_model
         if class_vector is None:
             cs_all = cls_idx.shape[0]
-            tgt_object = self.position_patterns.weight.reshape(1 , self.num_position, c).repeat(cs_all, 1, 1)
+            tgt_object = self.position_patterns.weight.reshape([1 , self.num_position, c]).tile([cs_all, 1, 1])
         elif class_vector.dim() == 3:
             bs, cs, c = class_vector.shape
-            tgt_pos = self.position_patterns.weight.reshape(1 , self.num_position, c).repeat(bs*cs, 1, 1)
-            tgt_object = tgt_pos + class_vector.view(bs*cs, 1, c) # bs*cs, nobj, c
+            tgt_pos = self.position_patterns.weight.reshape([1 , self.num_position, c]).tile([bs*cs, 1, 1])
+            tgt_object = tgt_pos + class_vector.reshape([bs*cs, 1, c]) # bs*cs, nobj, c
         elif class_vector.dim() == 2:
             cs_all, c = class_vector.shape
-            tgt_pos = self.position_patterns.weight.reshape(1 , self.num_position, c).repeat(cs_all, 1, 1)
-            tgt_object = tgt_pos + class_vector.view(cs_all, 1, c) # cs_all, nobj, c
+            tgt_pos = self.position_patterns.weight.reshape([1 , self.num_position, c]).tile([cs_all, 1, 1])
+            tgt_object = tgt_pos + class_vector.reshape([cs_all, 1, c]) # cs_all, nobj, c
         return tgt_object

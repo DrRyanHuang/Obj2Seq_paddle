@@ -6,7 +6,7 @@
 # ------------------------------------------------------------------------
 import numpy as np
 import os
-import torch
+# import torch
 
 def voc_mAP(imagessetfilelist, num, return_each=False):
     if isinstance(imagessetfilelist, str):

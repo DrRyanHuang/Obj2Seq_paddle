@@ -22,8 +22,9 @@ import numpy as np
 from PIL import Image, ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-import torch
-import torch.utils.data
+# import torch
+# import torch.utils.data
+import paddle
 from pycocotools import mask as coco_mask
 
 from .torchvision_datasets import CocoDetection as TvCocoDetection
@@ -116,7 +117,7 @@ class CocoDetection(TvCocoDetection):
         img, target = self.prepare(img, target)
         if self._transforms is not None:
             img, target = self._transforms(img, target)
-        target["num_classes"] = torch.as_tensor([len(self.coco.cats)])
+        target["num_classes"] = np.array([len(self.coco.cats)])
         return img, target
 
 
@@ -127,13 +128,13 @@ def convert_coco_poly_to_mask(segmentations, height, width):
         mask = coco_mask.decode(rles)
         if len(mask.shape) < 3:
             mask = mask[..., None]
-        mask = torch.as_tensor(mask, dtype=torch.uint8)
-        mask = mask.any(dim=2)
+        mask = paddle.to_tensor(mask, dtype=paddle.uint8)
+        mask = mask.any(axis=2)
         masks.append(mask)
     if masks:
-        masks = torch.stack(masks, dim=0)
+        masks = paddle.stack(masks, axis=0)
     else:
-        masks = torch.zeros((0, height, width), dtype=torch.uint8)
+        masks = paddle.zeros((0, height, width), dtype=paddle.uint8)
     return masks
 
 
@@ -153,24 +154,26 @@ class ConvertCocoPolysToMask(object):
         w, h = image.size
 
         image_id = target["image_id"]
-        image_id = torch.tensor([image_id])
+        # image_id = torch.tensor([image_id])
 
         anno = target["annotations"]
         # multi_labels = [self.json_category_id_to_contiguous_id[item["category_id"]] for item in anno]
-        # multi_labels = torch.as_tensor(multi_labels, dtype=torch.long).unique()
+        # multi_labels = paddle.to_tensor(multi_labels, dtype=torch.long).unique()
 
         # anno = [obj for obj in anno if 'iscrowd' not in obj or obj['iscrowd'] == 0]
 
         boxes = [obj["bbox"] for obj in anno]
         # guard against no boxes via resizing
-        boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+        # boxes = paddle.to_tensor(boxes, dtype=paddle.float32).reshape([-1, 4])
+        boxes = np.array(boxes, np.float32).reshape([-1, 4])
         boxes[:, 2:] += boxes[:, :2]
-        boxes[:, 0::2].clamp_(min=0, max=w)
-        boxes[:, 1::2].clamp_(min=0, max=h)
+        boxes[:, 0::2] = boxes[:, 0::2].clip(min=0, max=w)
+        boxes[:, 1::2] = boxes[:, 1::2].clip(min=0, max=h)
 
         classes = [obj["category_id"] for obj in anno]
         classes = [self.json_category_id_to_contiguous_id[c] for c in classes]
-        classes = torch.tensor(classes, dtype=torch.int64)
+        # classes = paddle.to_tensor(classes, dtype=paddle.int32)
+        classes = np.array(classes, dtype=np.int32)
 
         if self.return_masks:
             segmentations = [obj["segmentation"] for obj in anno]
@@ -179,10 +182,10 @@ class ConvertCocoPolysToMask(object):
         keypoints = None
         if anno and "keypoints" in anno[0]:
             keypoints = [obj["keypoints"] for obj in anno]
-            keypoints = torch.as_tensor(keypoints, dtype=torch.float32)
+            keypoints = paddle.to_tensor(keypoints, dtype=paddle.float32)
             num_keypoints = keypoints.shape[0]
             if num_keypoints:
-                keypoints = keypoints.view(num_keypoints, -1, 3)
+                keypoints = keypoints.reshape(num_keypoints, -1, 3)
 
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
         boxes = boxes[keep]
@@ -202,13 +205,13 @@ class ConvertCocoPolysToMask(object):
             target["keypoints"] = keypoints
 
         # for conversion to coco api
-        area = torch.tensor([obj["area"] for obj in anno])
-        iscrowd = torch.tensor([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
+        area = np.array([obj["area"] for obj in anno])
+        iscrowd = np.array([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
         target["area"] = area[keep]
         target["iscrowd"] = iscrowd[keep]
 
-        target["orig_size"] = torch.as_tensor([int(h), int(w)])
-        target["size"] = torch.as_tensor([int(h), int(w)])
+        target["orig_size"] = np.array([int(h), int(w)])
+        target["size"] = np.array([int(h), int(w)])
 
         return image, target
 
@@ -227,6 +230,7 @@ def build(image_set, transform, args):
 
     dataset = CocoDetection(img_folder, ann_file, transforms=transform, return_masks=args.COCO.masks,
                             cache_mode=args.cache_mode, local_rank=get_local_rank(), local_size=get_local_size(),
-                            is_train= image_set == "train",
+                            is_train= image_set == "train",  # TODO!TODO!TODO
+                            # is_train=True,
                             remove_empty_annotations=args.COCO.remove_empty_annotations)
     return dataset

@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 import numpy as np
-import torch
+# import torch
 from PIL import Image
 
 from panopticapi.utils import rgb2id
@@ -53,7 +53,7 @@ class CocoPanoptic:
             ids = np.array([ann['id'] for ann in ann_info['segments_info']])
             masks = masks == ids[:, None, None]
 
-            masks = torch.as_tensor(masks, dtype=torch.uint8)
+            masks = paddle.to_tensor(masks, dtype=paddle.uint8)
             labels = torch.tensor([ann['category_id'] for ann in ann_info['segments_info']], dtype=torch.int64)
 
         target = {}
@@ -64,8 +64,8 @@ class CocoPanoptic:
 
         target["boxes"] = masks_to_boxes(masks)
 
-        target['size'] = torch.as_tensor([int(h), int(w)])
-        target['orig_size'] = torch.as_tensor([int(h), int(w)])
+        target['size'] = paddle.to_tensor([int(h), int(w)])
+        target['orig_size'] = paddle.to_tensor([int(h), int(w)])
         if "segments_info" in ann_info:
             for name in ['iscrowd', 'area']:
                 target[name] = torch.tensor([ann[name] for ann in ann_info['segments_info']])

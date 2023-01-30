@@ -11,3 +11,8 @@ models/ops/
 # PHOENIX
 batchscript-*
 phoenix-slurm-*
+output/*
+
+# .vscode/*
+output40/*
+log/*

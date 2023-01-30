@@ -9,9 +9,9 @@
 
 import os
 import math
-import torch
-import torch.distributed as dist
-from torch.utils.data.sampler import Sampler
+import paddle
+import paddle.distributed as dist
+from paddle.io import Sampler
 
 
 class DistributedSampler(Sampler):
@@ -31,12 +31,12 @@ class DistributedSampler(Sampler):
 
     def __init__(self, dataset, num_replicas=None, rank=None, local_rank=None, local_size=None, shuffle=True, fix_split=False):
         if num_replicas is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
+            # if not dist.is_available():
+            #     raise RuntimeError("Requires distributed package to be available")
             num_replicas = dist.get_world_size()
         if rank is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
+            # if not dist.is_available():
+            #     raise RuntimeError("Requires distributed package to be available")
             rank = dist.get_rank()
         self.dataset = dataset
         self.num_replicas = num_replicas
@@ -102,12 +102,12 @@ class NodeDistributedSampler(Sampler):
 
     def __init__(self, dataset, num_replicas=None, rank=None, local_rank=None, local_size=None, shuffle=True):
         if num_replicas is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
+            # if not dist.is_available():
+            #     raise RuntimeError("Requires distributed package to be available")
             num_replicas = dist.get_world_size()
         if rank is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
+            # if not dist.is_available():
+            #     raise RuntimeError("Requires distributed package to be available")
             rank = dist.get_rank()
         if local_rank is None:
             local_rank = int(os.environ.get('LOCAL_RANK', 0))

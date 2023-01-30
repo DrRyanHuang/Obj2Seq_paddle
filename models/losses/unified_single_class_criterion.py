@@ -11,9 +11,9 @@
 # Modified from DETR (https://github.com/facebookresearch/detr)
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 # ------------------------------------------------------------------------
-import torch
-import torch.nn.functional as F
-from torch import nn
+import paddle
+import paddle.nn.functional as F
+from paddle import nn
 
 from .unified_matcher import build_matcher
 from .losses import sigmoid_focal_loss
@@ -29,7 +29,7 @@ KPS_OKS_SIGMAS = np.array([
 ]) / 10.0
 
 
-class UnifiedSingleClassCriterion(nn.Module):
+class UnifiedSingleClassCriterion(nn.Layer):
     """ This class computes the loss for DETR.
     The process happens in two steps:
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
@@ -45,7 +45,7 @@ class UnifiedSingleClassCriterion(nn.Module):
             args.*_normalization
             args.bce_negative_weight
         """
-        super().__init__()
+        super(UnifiedSingleClassCriterion, self).__init__()
         self.matcher = build_matcher(args.MATCHER)
         self.focal_alpha = args.focal_alpha
         # weight dict
@@ -73,9 +73,13 @@ class UnifiedSingleClassCriterion(nn.Module):
         src_logits = outputs['pred_logits']
 
         idx = self._get_src_permutation_idx(indices)
-        target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1]],
-                                            dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
-        target_classes_onehot[idx] = 1
+        target_classes_onehot = paddle.zeros([src_logits.shape[0], src_logits.shape[1]],
+                                            dtype=src_logits.dtype)
+        
+        if 0 == idx[0].numel().item() and 0 == idx[1].numel().item():
+            pass
+        else:
+            target_classes_onehot[idx] = 1
 
         loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes=None, alpha=self.focal_alpha, gamma=2) / self.loss_normalization[self.class_normalization]
         losses = {'loss_ce': loss_ce}
@@ -96,7 +100,7 @@ class UnifiedSingleClassCriterion(nn.Module):
         src_logits = outputs['pred_logits'].sigmoid()
         # valid_src_flag = torch.ones_like(src_logits)
         # valid_src_flag[srcs_idx] = targets['with_joint_flag'][tgts_idx].float()
-        target_logits = torch.zeros_like(src_logits)
+        target_logits = paddle.zeros_like(src_logits)
         target_logits[srcs_idx] = 1.0
         weight_matrix = torch.full_like(src_logits, self.bce_negative_weight)
         weight_matrix[srcs_idx] = 1.0
@@ -108,6 +112,11 @@ class UnifiedSingleClassCriterion(nn.Module):
         losses = {'loss_bce': loss_bce}
 
         return losses
+    
+    def none_idx(self, t, i):
+        if 0 == t['boxes'].numel().item() and 0 == i.numel().item():
+            return t['boxes']
+        return t['boxes'][i].reshape([-1, 4])
 
     def loss_boxes(self, outputs, targets, indices):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
@@ -116,30 +125,41 @@ class UnifiedSingleClassCriterion(nn.Module):
         """
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
-        src_boxes = outputs['pred_boxes'][idx]
-        target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        if 0 == idx[0].numel().item() and 0 == idx[1].numel().item():
+            src_boxes = paddle.to_tensor([], dtype="float32").reshape([0, 4])
+        else:
+            src_boxes = outputs['pred_boxes'][idx].reshape([-1, 4])
+        # target_boxes = paddle.concat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], axis=0)
+        target_boxes_list = [self.none_idx(t, i) for t, (_, i) in zip(targets, indices)]
+        target_boxes = paddle.concat(target_boxes_list, axis=0)  \
+                                        if sum([x.shape[0] for x in target_boxes_list]) > 0  \
+                                        else target_boxes_list[0]
+        target_boxes = target_boxes.reshape([-1, 4]) if target_boxes.shape != [0, 4] else target_boxes
 
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
 
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / self.loss_normalization[self.box_normalization]
 
-        loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
-            box_ops.box_cxcywh_to_xyxy(src_boxes),
-            box_ops.box_cxcywh_to_xyxy(target_boxes)))
-        losses['loss_giou'] = loss_giou.sum() / self.loss_normalization[self.box_normalization]
+        if 0 == src_boxes.numel().item() or 0 == target_boxes.numel().item():
+            losses['loss_giou'] = 0
+        else:
+            loss_giou = 1 - paddle.diag(box_ops.generalized_box_iou(
+                box_ops.box_cxcywh_to_xyxy(src_boxes),
+                box_ops.box_cxcywh_to_xyxy(target_boxes)))
+            losses['loss_giou'] = loss_giou.sum() / self.loss_normalization[self.box_normalization]
         return losses
 
     def loss_oks(self, outputs, targets, indices, with_center=True, eps=1e-15):
 
         idx = self._get_src_permutation_idx(indices)
         src_joints = outputs['pred_keypoints'][idx] # tgt, 17, 2
-        tgt_joints = torch.cat([t['keypoints'][i] for t, (_, i) in zip(targets, indices)], dim=0) # tgt, 17, 3
-        tgt_bboxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0) # tgt, 4
+        tgt_joints = paddle.concat([t['keypoints'][i] for t, (_, i) in zip(targets, indices)], axis=0) # tgt, 17, 3
+        tgt_bboxes = paddle.concat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], axis=0) # tgt, 4
 
         tgt_flags = tgt_joints[..., 2]
         tgt_joints = tgt_joints[..., 0:2]
-        tgt_flags = (tgt_flags > 0) * (tgt_joints >= 0).all(dim=-1) * (tgt_joints <= 1).all(dim=-1) # zychen
+        tgt_flags = (tgt_flags > 0) * (tgt_joints >= 0).all(axis=-1) * (tgt_joints <= 1).all(axis=-1) # zychen
         tgt_wh = tgt_bboxes[..., 2:]
         tgt_areas = tgt_wh[..., 0] * tgt_wh[..., 1]
         sigmas = KPS_OKS_SIGMAS # self.sigmas
@@ -147,9 +167,9 @@ class UnifiedSingleClassCriterion(nn.Module):
         # if with_center:
         #     tgt_center = tgt_bboxes[..., 0:2]
         #     sigma_center = sigmas.mean()
-        #     tgt_joints = torch.cat([tgt_joints, tgt_center[:, None, :]], dim=1)
+        #     tgt_joints = paddle.concat([tgt_joints, tgt_center[:, None, :]], axis=1)
         #     sigmas = np.append(sigmas, np.array([sigma_center]), axis=0)
-        #     tgt_flags = torch.cat([tgt_flags, torch.ones([tgt_flags.size(0), 1]).type_as(tgt_flags)], dim=1)
+        #     tgt_flags = paddle.concat([tgt_flags, torch.ones([tgt_flags.size(0), 1]).type_as(tgt_flags)], axis=1)
 
         sigmas = torch.tensor(sigmas).type_as(tgt_joints)
         d_sq = torch.square(src_joints - tgt_joints).sum(-1)
@@ -166,9 +186,9 @@ class UnifiedSingleClassCriterion(nn.Module):
         assert 'pred_keypoints' in outputs
         idx = self._get_src_permutation_idx(indices)
         src_kps = outputs['pred_keypoints'][idx]
-        target_kps = torch.cat([t['keypoints'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_kps = paddle.concat([t['keypoints'][i] for t, (_, i) in zip(targets, indices)], axis=0)
         tgt_kps = target_kps[..., :2]
-        tgt_visible = (target_kps[..., 2] > 0) * (tgt_kps >= 0).all(dim=-1) * (tgt_kps <= 1).all(dim=-1)
+        tgt_visible = (target_kps[..., 2] > 0) * (tgt_kps >= 0).all(axis=-1) * (tgt_kps <= 1).all(axis=-1)
         src_loss, tgt_loss = src_kps[tgt_visible], tgt_kps[tgt_visible]
 
         loss_keypoint = F.l1_loss(src_loss, tgt_loss, reduction="sum")
@@ -177,14 +197,25 @@ class UnifiedSingleClassCriterion(nn.Module):
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
-        batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
-        src_idx = torch.cat([src for (src, _) in indices])
+        
+        batch_idx_list = [paddle.full_like(src, i) for i, (src, _) in enumerate(indices)]
+        if 0 != sum([item.shape[0] for item in batch_idx_list]):
+            batch_idx = paddle.concat(batch_idx_list)
+        else:
+            batch_idx = batch_idx_list[0]
+            
+        src_idx_list = [src for (src, _) in indices]
+        if 0 != sum([item.shape[0] for item in src_idx_list]): 
+            src_idx = paddle.concat(src_idx_list)
+        else:
+            src_idx = src_idx_list[0]
+            
         return batch_idx, src_idx
 
     def _get_tgt_permutation_idx(self, indices):
         # permute targets following indices
-        batch_idx = torch.cat([torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)])
-        tgt_idx = torch.cat([tgt for (_, tgt) in indices])
+        batch_idx = paddle.concat([paddle.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)])
+        tgt_idx = paddle.concat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
     def get_loss(self, loss, outputs, targets, indices):

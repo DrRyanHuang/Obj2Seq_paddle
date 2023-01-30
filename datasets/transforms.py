@@ -14,38 +14,88 @@
 """
 Transforms and data augmentation for both image + bbox.
 """
+from __future__ import absolute_import
+from __future__ import print_function
+from __future__ import division
+
 import random
 import numpy as np
+import uuid
+
+try:
+    from collections.abc import Sequence
+except Exception:
+    from collections import Sequence
 
 import PIL
-import torch
-import torchvision.transforms as T
-import torchvision.transforms.functional as F
+from PIL import Image
+import paddle
+import paddle.vision.transforms as T
+from paddle.vision.transforms import functional as F
+
 
 from util.box_ops import box_xyxy_to_cxcywh
 from util.misc import interpolate
 
 
-def crop(image, target, region):
+def _is_pil_image(img):
+    return isinstance(img, Image.Image)
+
+
+def _is_tensor_image(img):
+    return isinstance(img, paddle.Tensor)
+
+
+def _is_numpy_image(img):
+    return isinstance(img, np.ndarray) and (img.ndim in {2, 3})
+
+
+def _get_image_size(img):
+    if _is_pil_image(img):
+        return img.size
+    elif _is_numpy_image(img):
+        return img.shape[:2][::-1]
+    elif _is_tensor_image(img):
+        if len(img.shape) == 3:
+            return img.shape[1:][::-1]  # chw -> wh
+        elif len(img.shape) == 4:
+            return img.shape[2:][::-1]  # nchw -> wh
+        else:
+            raise ValueError(
+                "The dim for input Tensor should be 3-D or 4-D, but received {}".format(
+                    len(img.shape)
+                )
+            )
+    else:
+        raise TypeError("Unexpected type {}".format(type(img)))
+
+
+def crop(image, target_old, region):
     cropped_image = F.crop(image, *region)
 
-    target = target.copy()
+    target = target_old.copy()
     i, j, h, w = region
 
     # should we do something wrt the original size?
-    target["size"] = torch.tensor([h, w])
+    target["size"] = np.array([h, w])
 
     fields = ["labels", "area", "iscrowd"]
 
     if "boxes" in target:
         boxes = target["boxes"]
-        max_size = torch.as_tensor([w, h], dtype=torch.float32)
-        cropped_boxes = boxes - torch.as_tensor([j, i, j, i])
-        cropped_boxes = torch.min(cropped_boxes.reshape(-1, 2, 2), max_size)
-        cropped_boxes = cropped_boxes.clamp(min=0)
-        area = (cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]).prod(dim=1)
+        max_size = np.array([w, h], dtype=np.float32)
+        cropped_boxes = boxes - np.array([j, i, j, i])
+        cropped_boxes = np.minimum(cropped_boxes.reshape(-1, 2, 2), max_size)
+        cropped_boxes = cropped_boxes.clip(min=0)
+        area = (cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]).prod(axis=1)
         target["boxes"] = cropped_boxes.reshape(-1, 4)
         target["area"] = area
+        
+        # Fix No Object BUG
+        # If Not, it throw fucking stupid `Segmentation fault` when distributed training with fleet
+        if not (area > 1).any(): # 如果裁剪出的图片没有目标，直接返回原图吧!
+            return image, target_old
+        
         fields.append("boxes")
 
     if "masks" in target:
@@ -55,7 +105,7 @@ def crop(image, target, region):
 
     if "keypoints" in target:
         keypoints = target['keypoints']
-        keypoints = keypoints - torch.as_tensor([j, i, 0])
+        keypoints = keypoints - np.array([j, i, 0.])
         target['keypoints'] = keypoints
         fields.append("keypoints")
 
@@ -65,14 +115,219 @@ def crop(image, target, region):
         # this is compatible with previous implementation
         if "boxes" in target:
             cropped_boxes = target['boxes'].reshape(-1, 2, 2)
-            keep = torch.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
+            # keep = np.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], axis=1)
+            keep = area > 1
         else:
             keep = target['masks'].flatten(1).any(1)
 
         for field in fields:
             target[field] = target[field][keep]
+        # print(keep)
 
     return cropped_image, target
+
+
+# class BaseOperator(object):
+#     def __init__(self, name=None):
+#         if name is None:
+#             name = self.__class__.__name__
+#         self._id = name + '_' + str(uuid.uuid4())[-6:]
+
+#     def apply(self, sample, context=None):
+#         """ Process a sample.
+#         Args:
+#             sample (dict): a dict of sample, eg: {'image':xx, 'label': xxx}
+#             context (dict): info about this sample processing
+#         Returns:
+#             result (dict): a processed sample
+#         """
+#         return sample
+
+#     def __call__(self, sample, context=None):
+#         """ Process a sample.
+#         Args:
+#             sample (dict): a dict of sample, eg: {'image':xx, 'label': xxx}
+#             context (dict): info about this sample processing
+#         Returns:
+#             result (dict): a processed sample
+#         """
+#         if isinstance(sample, Sequence):
+#             for i in range(len(sample)):
+#                 sample[i] = self.apply(sample[i], context)
+#         else:
+#             sample = self.apply(sample, context)
+#         return sample
+
+#     def __str__(self):
+#         return str(self._id)
+
+
+# class RandomSizeCrop(BaseOperator):
+#     """
+#     Cut the image randomly according to `min_size` and `max_size`
+#     """
+
+#     def __init__(self, min_size, max_size):
+#         super(RandomSizeCrop, self).__init__()
+#         self.min_size = min_size
+#         self.max_size = max_size
+
+#         from paddle.vision.transforms.functional import crop as paddle_crop
+#         self.paddle_crop = paddle_crop
+
+#     @staticmethod
+#     def get_crop_params(img_shape, output_size):
+#         """Get parameters for ``crop`` for a random crop.
+#         Args:
+#             img_shape (list|tuple): Image's height and width.
+#             output_size (list|tuple): Expected output size of the crop.
+#         Returns:
+#             tuple: params (i, j, h, w) to be passed to ``crop`` for random crop.
+#         """
+#         h, w = img_shape
+#         th, tw = output_size
+
+#         if h + 1 < th or w + 1 < tw:
+#             raise ValueError(
+#                 "Required crop size {} is larger then input image size {}".
+#                 format((th, tw), (h, w)))
+
+#         if w == tw and h == th:
+#             return 0, 0, h, w
+
+#         i = random.randint(0, h - th + 1)
+#         j = random.randint(0, w - tw + 1)
+#         return i, j, th, tw
+
+#     def crop(self, sample, region):
+#         image_shape = sample['image'].shape[:2]
+#         sample['image'] = self.paddle_crop(sample['image'], *region)
+
+#         keep_index = None
+#         # apply bbox
+#         if 'gt_bbox' in sample and len(sample['gt_bbox']) > 0:
+#             sample['gt_bbox'] = self.apply_bbox(sample['gt_bbox'], region)
+#             bbox = sample['gt_bbox'].reshape([-1, 2, 2])
+#             area = (bbox[:, 1, :] - bbox[:, 0, :]).prod(axis=1)
+#             keep_index = np.where(area > 0)[0]
+#             sample['gt_bbox'] = sample['gt_bbox'][keep_index] if len(
+#                 keep_index) > 0 else np.zeros(
+#                     [0, 4], dtype=np.float32)
+#             sample['gt_class'] = sample['gt_class'][keep_index] if len(
+#                 keep_index) > 0 else np.zeros(
+#                     [0, 1], dtype=np.float32)
+#             if 'gt_score' in sample:
+#                 sample['gt_score'] = sample['gt_score'][keep_index] if len(
+#                     keep_index) > 0 else np.zeros(
+#                         [0, 1], dtype=np.float32)
+#             if 'is_crowd' in sample:
+#                 sample['is_crowd'] = sample['is_crowd'][keep_index] if len(
+#                     keep_index) > 0 else np.zeros(
+#                         [0, 1], dtype=np.float32)
+
+#         # # apply polygon
+#         # if 'gt_poly' in sample and len(sample['gt_poly']) > 0:
+#         #     sample['gt_poly'] = self.apply_segm(sample['gt_poly'], region,
+#         #                                         image_shape)
+#         #     if keep_index is not None:
+#         #         sample['gt_poly'] = sample['gt_poly'][keep_index]
+#         # # apply gt_segm
+#         # if 'gt_segm' in sample and len(sample['gt_segm']) > 0:
+#         #     i, j, h, w = region
+#         #     sample['gt_segm'] = sample['gt_segm'][:, i:i + h, j:j + w]
+#         #     if keep_index is not None:
+#         #         sample['gt_segm'] = sample['gt_segm'][keep_index]
+
+#         return sample
+
+#     def apply_bbox(self, bbox, region):
+#         i, j, h, w = region
+#         region_size = np.asarray([w, h])
+#         crop_bbox = bbox - np.asarray([j, i, j, i])
+#         crop_bbox = np.minimum(crop_bbox.reshape([-1, 2, 2]), region_size)
+#         crop_bbox = crop_bbox.clip(min=0)
+#         return crop_bbox.reshape([-1, 4]).astype('float32')
+
+#     # ------- No need to deal with segm -------
+#     # def apply_segm(self, segms, region, image_shape):
+#     #     def _crop_poly(segm, crop):
+#     #         xmin, ymin, xmax, ymax = crop
+#     #         crop_coord = [xmin, ymin, xmin, ymax, xmax, ymax, xmax, ymin]
+#     #         crop_p = np.array(crop_coord).reshape(4, 2)
+#     #         crop_p = Polygon(crop_p)
+
+#     #         crop_segm = list()
+#     #         for poly in segm:
+#     #             poly = np.array(poly).reshape(len(poly) // 2, 2)
+#     #             polygon = Polygon(poly)
+#     #             if not polygon.is_valid:
+#     #                 exterior = polygon.exterior
+#     #                 multi_lines = exterior.intersection(exterior)
+#     #                 polygons = shapely.ops.polygonize(multi_lines)
+#     #                 polygon = MultiPolygon(polygons)
+#     #             multi_polygon = list()
+#     #             if isinstance(polygon, MultiPolygon):
+#     #                 multi_polygon = copy.deepcopy(polygon)
+#     #             else:
+#     #                 multi_polygon.append(copy.deepcopy(polygon))
+#     #             for per_polygon in multi_polygon:
+#     #                 inter = per_polygon.intersection(crop_p)
+#     #                 if not inter:
+#     #                     continue
+#     #                 if isinstance(inter, (MultiPolygon, GeometryCollection)):
+#     #                     for part in inter:
+#     #                         if not isinstance(part, Polygon):
+#     #                             continue
+#     #                         part = np.squeeze(
+#     #                             np.array(part.exterior.coords[:-1]).reshape(1,
+#     #                                                                         -1))
+#     #                         part[0::2] -= xmin
+#     #                         part[1::2] -= ymin
+#     #                         crop_segm.append(part.tolist())
+#     #                 elif isinstance(inter, Polygon):
+#     #                     crop_poly = np.squeeze(
+#     #                         np.array(inter.exterior.coords[:-1]).reshape(1, -1))
+#     #                     crop_poly[0::2] -= xmin
+#     #                     crop_poly[1::2] -= ymin
+#     #                     crop_segm.append(crop_poly.tolist())
+#     #                 else:
+#     #                     continue
+#     #         return crop_segm
+
+#     #     def _crop_rle(rle, crop, height, width):
+#     #         if 'counts' in rle and type(rle['counts']) == list:
+#     #             rle = mask_util.frPyObjects(rle, height, width)
+#     #         mask = mask_util.decode(rle)
+#     #         mask = mask[crop[1]:crop[3], crop[0]:crop[2]]
+#     #         rle = mask_util.encode(np.array(mask, order='F', dtype=np.uint8))
+#     #         return rle
+
+#     #     i, j, h, w = region
+#     #     crop = [j, i, j + w, i + h]
+#     #     height, width = image_shape
+#     #     crop_segms = []
+#     #     for segm in segms:
+#     #         if is_poly(segm):
+#     #             import copy
+#     #             import shapely.ops
+#     #             from shapely.geometry import Polygon, MultiPolygon, GeometryCollection
+#     #             # Polygon format
+#     #             crop_segms.append(_crop_poly(segm, crop))
+#     #         else:
+#     #             # RLE format
+#     #             import pycocotools.mask as mask_util
+#     #             crop_segms.append(_crop_rle(segm, crop, height, width))
+#     #     return crop_segms
+
+#     def apply(self, sample, context=None):
+#         h = random.randint(self.min_size,
+#                            min(sample['image'].shape[0], self.max_size))
+#         w = random.randint(self.min_size,
+#                            min(sample['image'].shape[1], self.max_size))
+
+#         region = self.get_crop_params(sample['image'].shape[:2], [h, w])
+#         return self.crop(sample, region)
+
 
 
 KPT_FLIP_INDEX = [
@@ -88,15 +343,15 @@ def hflip(image, target):
     target = target.copy()
     if "boxes" in target:
         boxes = target["boxes"]
-        boxes = boxes[:, [2, 1, 0, 3]] * torch.as_tensor([-1, 1, -1, 1]) + torch.as_tensor([w, 0, w, 0])
+        boxes = boxes[:, [2, 1, 0, 3]] * np.array([-1., 1., -1., 1.]) + np.array([w, 0., w, 0.])
         target["boxes"] = boxes
 
     if "masks" in target:
-        target['masks'] = target['masks'].flip(-1)
+        target['masks'] = target['masks'].flip(-1) # TODO: Fix no clip
 
     if "keypoints" in target:
         keypoints = target['keypoints']
-        keypoints = keypoints * torch.as_tensor([-1, 1, 1]) + torch.as_tensor([w, 0, 0])
+        keypoints = keypoints * np.array([-1, 1, 1]) + np.array([w, 0, 0])
         keypoints = keypoints[:, KPT_FLIP_INDEX]
         target['keypoints'] = keypoints
 
@@ -141,7 +396,7 @@ def resize(image, target, size, max_size=None):
     target = target.copy()
     if "boxes" in target:
         boxes = target["boxes"]
-        scaled_boxes = boxes * torch.as_tensor([ratio_width, ratio_height, ratio_width, ratio_height])
+        scaled_boxes = boxes * np.array([ratio_width, ratio_height, ratio_width, ratio_height])
         target["boxes"] = scaled_boxes
 
     if "area" in target:
@@ -150,15 +405,15 @@ def resize(image, target, size, max_size=None):
         target["area"] = scaled_area
 
     h, w = size
-    target["size"] = torch.tensor([h, w])
+    target["size"] = np.array([h, w])
 
     if "masks" in target:
         target['masks'] = interpolate(
-            target['masks'][:, None].float(), size, mode="nearest")[:, 0] > 0.5
+            target['masks'][:, None].astype("float32"), size, mode="nearest")[:, 0] > 0.5
 
     if "keypoints" in target:
         keypoints = target["keypoints"]
-        scaled_keypoints = keypoints * torch.as_tensor([ratio_width, ratio_height, 1])
+        scaled_keypoints = keypoints * np.array([ratio_width, ratio_height, 1])
         target["keypoints"] = scaled_keypoints
 
     return rescaled_image, target
@@ -171,12 +426,12 @@ def pad(image, target, padding):
         return padded_image, None
     target = target.copy()
     # should we do something wrt the original size?
-    target["size"] = torch.tensor(padded_image[::-1])
+    target["size"] = np.array(padded_image[::-1])
     if "masks" in target:
-        target['masks'] = torch.nn.functional.pad(target['masks'], (0, padding[0], 0, padding[1]))
+        target['masks'] = F.pad(target['masks'], (0, padding[0], 0, padding[1])) # TODO
     if "keypoints" in target:
         keypoints = target['keypoints']
-        keypoints = keypoints + torch.as_tensor([padding[0], padding[1], 0])
+        keypoints = keypoints + np.array([padding[0], padding[1], 0])
         target['keypoints'] = keypoints
     return padded_image, target
 
@@ -186,7 +441,7 @@ class RandomCrop(object):
         self.size = size
 
     def __call__(self, img, target):
-        region = T.RandomCrop.get_params(img, self.size)
+        region = T.RandomCrop._get_param(None, img, self.size)
         return crop(img, target, region)
 
 
@@ -194,11 +449,39 @@ class RandomSizeCrop(object):
     def __init__(self, min_size: int, max_size: int):
         self.min_size = min_size
         self.max_size = max_size
+    
+    @staticmethod
+    def _get_param(img: PIL.Image.Image, output_size):
+        """Get parameters for ``crop`` for a random crop.
+
+        Args:
+            img (PIL Image): Image to be cropped.
+            output_size (tuple): Expected output size of the crop.
+
+        Returns:
+            tuple: params (i, j, h, w) to be passed to ``crop`` for random crop.
+        """
+        w, h = _get_image_size(img)
+        th, tw = output_size
+        
+        if h + 1 < th or w + 1 < tw:
+            raise ValueError(
+                "Required crop size {} is larger then input image size {}".
+                format((th, tw), (h, w)))
+        
+        if w == tw and h == th:
+            return 0, 0, h, w
+
+        i = random.randint(0, h - th + 1)
+        j = random.randint(0, w - tw + 1)
+        return i, j, th, tw # 左上角(y x), h和w
 
     def __call__(self, img: PIL.Image.Image, target: dict):
         w = random.randint(self.min_size, min(img.width, self.max_size))
         h = random.randint(self.min_size, min(img.height, self.max_size))
-        region = T.RandomCrop.get_params(img, [h, w])
+        # 这样写浪费我一天时间 (x) 问题不是这里
+        # region = T.RandomCrop._get_param(None, img, [h, w]) 
+        region = self._get_param(img, [h, w])
         return crop(img, target, region)
 
 
@@ -267,7 +550,7 @@ class LargeScaleJitter(object):
     """
 
     def __init__(self, output_size=1333, aug_scale_min=0.3, aug_scale_max=2.0):
-        self.desired_size = torch.tensor(output_size)
+        self.desired_size = np.array(output_size)
         self.aug_scale_min = aug_scale_min
         self.aug_scale_max = aug_scale_max
 
@@ -281,7 +564,7 @@ class LargeScaleJitter(object):
 
         if "boxes" in target:
             boxes = target["boxes"]
-            scaled_boxes = boxes * torch.as_tensor([ratio_width, ratio_height, ratio_width, ratio_height])
+            scaled_boxes = boxes * np.array([ratio_width, ratio_height, ratio_width, ratio_height])
             target["boxes"] = scaled_boxes
 
         if "area" in target:
@@ -292,12 +575,12 @@ class LargeScaleJitter(object):
         if "masks" in target:
             masks = target['masks']
             masks = interpolate(
-                masks[:, None].float(), scaled_size, mode="nearest")[:, 0] > 0.5
+                masks[:, None].astype("float32"), scaled_size, mode="nearest")[:, 0] > 0.5
             target['masks'] = masks
 
         if "keypoints" in target:
             keypoints = target["keypoints"]
-            scaled_keypoints = keypoints * torch.as_tensor([ratio_width, ratio_height, 1])
+            scaled_keypoints = keypoints * np.array([ratio_width, ratio_height, 1])
             target["keypoints"] = scaled_keypoints
         return target
 
@@ -306,15 +589,15 @@ class LargeScaleJitter(object):
         fields = ["labels", "area", "iscrowd"]
 
         target = target.copy()
-        target["size"] = torch.tensor([h, w])
+        target["size"] = np.array([h, w])
 
         if "boxes" in target:
             boxes = target["boxes"]
-            max_size = torch.as_tensor([w, h], dtype=torch.float32)
-            cropped_boxes = boxes - torch.as_tensor([j, i, j, i])
-            cropped_boxes = torch.min(cropped_boxes.reshape(-1, 2, 2), max_size)
-            cropped_boxes = cropped_boxes.clamp(min=0)
-            area = (cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]).prod(dim=1)
+            max_size = np.array([w, h], dtype=paddle.float32)
+            cropped_boxes = boxes - np.array([j, i, j, i])
+            cropped_boxes = np.minimum(cropped_boxes.reshape(-1, 2, 2), max_size)
+            cropped_boxes = cropped_boxes.clip(min=0)
+            area = (cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]).prod(axis=1)
             target["boxes"] = cropped_boxes.reshape(-1, 4)
             target["area"] = area
             fields.append("boxes")
@@ -326,7 +609,7 @@ class LargeScaleJitter(object):
 
         if "keypoints" in target:
             keypoints = target['keypoints']
-            keypoints = keypoints - torch.as_tensor([j, i, 0])
+            keypoints = keypoints - np.array([j, i, 0])
             target['keypoints'] = keypoints
             fields.append("keypoints")
 
@@ -336,7 +619,7 @@ class LargeScaleJitter(object):
             # this is compatible with previous implementation
             if "boxes" in target:
                 cropped_boxes = target['boxes'].reshape(-1, 2, 2)
-                keep = torch.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
+                keep = np.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], axis=1)
             else:
                 keep = target['masks'].flatten(1).any(1)
 
@@ -347,16 +630,16 @@ class LargeScaleJitter(object):
     def pad_target(self, padding, target):
         target = target.copy()
         if "masks" in target:
-            target['masks'] = torch.nn.functional.pad(target['masks'], (0, padding[1], 0, padding[0]))
+            target['masks'] = F.pad(target['masks'], (0, padding[1], 0, padding[0]))
         if "keypoints" in target:
             keypoints = target['keypoints']
-            keypoints = keypoints + torch.as_tensor([padding[1], padding[0], 0])
+            keypoints = keypoints + np.array([padding[1], padding[0], 0])
             target['keypoints'] = keypoints
         return target
 
     def __call__(self, image, target=None):
         image_size = image.size
-        image_size = torch.tensor(image_size[::-1])
+        image_size = np.array(image_size[::-1])
 
         out_desired_size = (self.desired_size * image_size / max(image_size)).round().int()
 
@@ -411,6 +694,15 @@ class ToTensor(object):
         return F.to_tensor(img), target
 
 
+class ImgToNumpyArray(object):
+    def __call__(self, img, target):
+        if isinstance(img, np.ndarray):
+            return img, target
+        if isinstance(img, paddle.Tensor):
+            return img.numpy(), target
+        return F.to_tensor(img).numpy(), target
+
+
 class RandomErasing(object):
 
     def __init__(self, *args, **kwargs):
@@ -434,11 +726,11 @@ class Normalize(object):
         if "boxes" in target:
             boxes = target["boxes"]
             boxes = box_xyxy_to_cxcywh(boxes)
-            boxes = boxes / torch.tensor([w, h, w, h], dtype=torch.float32)
-            target["boxes"] = boxes
+            boxes = boxes / np.array([w, h, w, h], dtype=np.float32)
+            target["boxes"] = boxes.astype("float32")
         if "keypoints" in target:
             keypoints = target["keypoints"]
-            keypoints = keypoints / torch.tensor([w, h, 1], dtype=torch.float32)
+            keypoints = keypoints / np.array([w, h, 1], dtype=np.float32)
             target["keypoints"] = keypoints
         return image, target
 
@@ -448,10 +740,10 @@ class GenerateClassificationResults(object):
         self.num_cats = num_cats
 
     def __call__(self, image, target):
-        multi_labels = target["labels"].unique()
-        multi_label_onehot = torch.zeros(self.num_cats)
+        multi_labels = np.unique(target["labels"])
+        multi_label_onehot = np.zeros(self.num_cats, dtype="float32")
         multi_label_onehot[multi_labels] = 1
-        multi_label_weights = torch.ones_like(multi_label_onehot)
+        multi_label_weights = np.ones_like(multi_label_onehot)
 
         # filter crowd items
         keep = target["iscrowd"] == 0
@@ -473,8 +765,8 @@ class GenerateClassificationResults(object):
             multi_label_weights = multi_label_onehot.clone()
             multi_label_weights[neg_category_ids] = 1
         else:
-            sample_prob = torch.zeros_like(multi_label_onehot) - 1
-            sample_prob[target["labels"].unique()] = 1
+            sample_prob = np.zeros_like(multi_label_onehot) - 1
+            sample_prob[np.unique(target["labels"])] = 1
         target["multi_label_onehot"] = multi_label_onehot
         target["multi_label_weights"] = multi_label_weights
         target["force_sample_probs"] = sample_prob
@@ -489,10 +781,10 @@ class RearrangeByCls(object):
         self.keep_keys = keep_keys
 
     def __call__(self, image, target=None):
-        target["class_label"] = target["labels"].unique()
+        target["class_label"] = np.unique(target["labels"])
 
         new_target = {}
-        for icls in target["labels"].unique():
+        for icls in np.unique(target["labels"]):
             icls = icls.item()
             new_target[icls] = {}
             where = target["labels"] == icls

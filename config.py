@@ -25,8 +25,8 @@ _C = CN()
 _C.DATA = CN()
 _C.DATA.type = 'coco'
 _C.DATA.batch_size = 1
-_C.DATA.num_workers = 2
-_C.DATA.distributed = True
+_C.DATA.num_workers = 8 # TODO!TODO!TODO
+_C.DATA.distributed = False # TODO!TODO!TODO # 此处已被启用
 _C.DATA.cache_mode = False # whether to cache images on memory
 _C.DATA.sampler_fix_split = False
 
@@ -51,7 +51,7 @@ _C.DATA.COCO = CN()
 _C.DATA.COCO.coco_path = 'data/coco'
 _C.DATA.COCO.anno_train = 'data/coco/annotations/instances_train2017.json'
 _C.DATA.COCO.anno_val = 'data/coco/annotations/instances_val2017.json'
-_C.DATA.COCO.remove_empty_annotations = False
+_C.DATA.COCO.remove_empty_annotations = True # TODO!TODO!TODO
 _C.DATA.COCO.masks = False
 
 _C.DATA.COCO_HYBRID = CN()
@@ -68,7 +68,7 @@ _C.DATA.IMNET.meta_file = '/mnt/lustre/chenzhiyang.vendor/meta'
 BASIC_LAYER_CFG = CN()
 BASIC_LAYER_CFG.hidden_dim = 256
 BASIC_LAYER_CFG.nheads = 8
-BASIC_LAYER_CFG.dim_feedforward = 1024
+BASIC_LAYER_CFG.dim_feedforward = 512 # TODO!TODO!TODO
 BASIC_LAYER_CFG.dropout = 0.
 BASIC_LAYER_CFG.self_attn_dropout = 0.
 BASIC_LAYER_CFG.activation = "relu"
@@ -95,7 +95,7 @@ _C.MODEL.BACKBONE.num_feature_levels = 4
 _C.MODEL.BACKBONE.RESNET = CN()
 _C.MODEL.BACKBONE.RESNET.name = 'resnet50'
 _C.MODEL.BACKBONE.RESNET.dilation = False
-_C.MODEL.BACKBONE.RESNET.pretrained = True
+_C.MODEL.BACKBONE.RESNET.pretrained = False
 _C.MODEL.BACKBONE.RESNET.norm_layer = 'FrozenBN'
 _C.MODEL.BACKBONE.SWIN = CN()
 _C.MODEL.BACKBONE.SWIN.embed_dim = 96
@@ -104,7 +104,7 @@ _C.MODEL.BACKBONE.SWIN.num_heads = [3, 6, 12, 24]
 _C.MODEL.BACKBONE.SWIN.window_size = 7
 _C.MODEL.BACKBONE.SWIN.pretrained = None
 
-_C.MODEL.enc_layers = 6
+_C.MODEL.enc_layers = 4
 _C.MODEL.ENCODER_LAYER = copy.deepcopy(BASIC_LAYER_CFG)
 # position embedding TODO: A more generalized pos emb
 _C.MODEL.hidden_dim = 256
@@ -132,16 +132,16 @@ _C.MODEL.PROMPT_INDICATOR.CLASSIFIER.hidden_dim = 256
 _C.MODEL.PROMPT_INDICATOR.CLASSIFIER.num_layers = 2
 _C.MODEL.PROMPT_INDICATOR.CLASSIFIER.init_prob = 0.1
 _C.MODEL.PROMPT_INDICATOR.CLASSIFIER.num_points = 1
-_C.MODEL.PROMPT_INDICATOR.CLASSIFIER.skip_and_init = False
+_C.MODEL.PROMPT_INDICATOR.CLASSIFIER.skip_and_init = True
 _C.MODEL.PROMPT_INDICATOR.CLASSIFIER.normalize_before = False
 # asl loss
 _C.MODEL.PROMPT_INDICATOR.LOSS = CN()
 _C.MODEL.PROMPT_INDICATOR.LOSS.losses = ['asl']
 _C.MODEL.PROMPT_INDICATOR.LOSS.asl_optimized = True
 _C.MODEL.PROMPT_INDICATOR.LOSS.asl_loss_weight = 0.25
-_C.MODEL.PROMPT_INDICATOR.LOSS.asl_gamma_pos = 0.0
-_C.MODEL.PROMPT_INDICATOR.LOSS.asl_gamma_neg = 2.0
-_C.MODEL.PROMPT_INDICATOR.LOSS.asl_clip = 0.0
+_C.MODEL.PROMPT_INDICATOR.LOSS.asl_gamma_pos = 1.0
+_C.MODEL.PROMPT_INDICATOR.LOSS.asl_gamma_neg = 3.0
+_C.MODEL.PROMPT_INDICATOR.LOSS.asl_clip = 0.02
 # cfg for retention_policy
 _C.MODEL.PROMPT_INDICATOR.retain_categories = True
 _C.MODEL.PROMPT_INDICATOR.RETENTION_POLICY = CN()
@@ -156,7 +156,7 @@ _C.MODEL.PROMPT_INDICATOR.RETENTION_POLICY.eval_class_thr = 0.0
 _C.MODEL.with_object_decoder = True
 _C.MODEL.OBJECT_DECODER = CN()
 _C.MODEL.OBJECT_DECODER.LAYER = copy.deepcopy(BASIC_LAYER_CFG)
-_C.MODEL.OBJECT_DECODER.num_layers = 4
+_C.MODEL.OBJECT_DECODER.num_layers = 3
 _C.MODEL.OBJECT_DECODER.num_query_position = 100
 _C.MODEL.OBJECT_DECODER.spatial_prior = 'sigmoid'
 _C.MODEL.OBJECT_DECODER.refine_reference_points = False
@@ -168,7 +168,7 @@ _C.MODEL.OBJECT_DECODER.HEAD.sg_previous_logits = False
 _C.MODEL.OBJECT_DECODER.HEAD.combine_method = "none"
 # for sequence head
 _C.MODEL.OBJECT_DECODER.HEAD.pos_emb = True
-_C.MODEL.OBJECT_DECODER.HEAD.num_steps = 4
+_C.MODEL.OBJECT_DECODER.HEAD.num_steps = 4 # TODO!TODO!TODO
 _C.MODEL.OBJECT_DECODER.HEAD.num_classes = 80
 _C.MODEL.OBJECT_DECODER.HEAD.task_category = "configs/tasks/coco_detection.json"
 ## for change structure in attention
@@ -185,7 +185,7 @@ _C.MODEL.OBJECT_DECODER.HEAD.CLASSIFIER.hidden_dim = 256
 _C.MODEL.OBJECT_DECODER.HEAD.CLASSIFIER.num_layers = 2
 _C.MODEL.OBJECT_DECODER.HEAD.CLASSIFIER.init_prob = 0.01
 _C.MODEL.OBJECT_DECODER.HEAD.CLASSIFIER.num_points = 1
-_C.MODEL.OBJECT_DECODER.HEAD.CLASSIFIER.skip_and_init = False
+_C.MODEL.OBJECT_DECODER.HEAD.CLASSIFIER.skip_and_init = True
 _C.MODEL.OBJECT_DECODER.HEAD.CLASSIFIER.normalize_before = False
 
 _C.MODEL.OBJECT_DECODER.HEAD.LOSS = CN()
@@ -230,7 +230,7 @@ _C.MODEL.OBJECT_DECODER.HEAD.LOSS.MATCHER.set_keypoint_reference = "absolute" # 
 # Training settings
 # -----------------------------------------------------------------------------
 _C.TRAIN = CN()
-_C.TRAIN.epochs = 50
+_C.TRAIN.epochs = 2000
 _C.TRAIN.clip_max_norm = 0.1 # gradient clipping max norm
 _C.TRAIN.lr = 1e-4
 _C.TRAIN.lr_groups = [["backbone"]]
@@ -238,10 +238,13 @@ _C.TRAIN.lr_mults = [0.1]
 _C.TRAIN.weight_decay = 1e-4
 _C.TRAIN.no_weight_decay_keywords = ["class_prompts", "position", "pos_emb"]
 _C.TRAIN.lr_drop = 40
+_C.TRAIN.T_max = 10
 _C.TRAIN.lr_drop_epochs = None # not used
 _C.TRAIN.sgd = False
 # timm scheduler
 _C.TRAIN.sched = "Step"
+_C.TRAIN.fleet = True
+_C.TRAIN.amp = False
 
 _C.EVAL = CN()
 _C.EVAL.postprocessor = "MultiClass"

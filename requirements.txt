@@ -3,9 +3,9 @@ tqdm
 cython
 scipy
 opencv-python
-packaging
-ftfy
+# packaging
+# ftfy
 yacs
-regex
-timm==0.3.2
-randaugment
+# regex
+# timm==0.3.2
+# randaugment

@@ -7,8 +7,10 @@ import datasets.transforms as T
 import random
 import numpy as np
 from PIL import ImageDraw
-from torchvision.transforms import transforms
-from randaugment import RandAugment
+# from torchvision.transforms import transforms
+# from randaugment import RandAugment
+# from timm.data import create_transform
+# from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 def make_coco_transforms(image_set, args):
     # args.DATA.TRANSFORM
@@ -17,6 +19,7 @@ def make_coco_transforms(image_set, args):
 
     normalize = T.Compose([
         T.ToTensor(),
+        # T.ToNumpyArray(),
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
@@ -36,7 +39,7 @@ def make_coco_transforms(image_set, args):
                 T.RandomResize(scales, max_size=max_input_size),
                 T.Compose([
                     T.RandomResize([400, 500, 600]),
-                    T.RandomSizeCrop(384, 600),
+                    # T.RandomSizeCrop(384, 600), # TODO!TODO!TODO Fix Segmentfault bug
                     T.RandomResize(scales, max_size=max_input_size),
                 ])
             ))
@@ -47,6 +50,7 @@ def make_coco_transforms(image_set, args):
                 normalize,
                 T.GenerateClassificationResults(num_cats=args.num_classes),
                 T.RearrangeByCls(min_keypoints_train=args.min_keypoints_train),
+                T.ImgToNumpyArray(),
             ])
         else:
             transforms.append(normalize)
@@ -61,14 +65,14 @@ def make_coco_transforms(image_set, args):
             transforms.extend([
                 T.GenerateClassificationResults(num_cats=args.num_classes),
                 T.RearrangeByCls(),
+                T.ImgToNumpyArray(),
             ])
         return T.Compose(transforms)
 
     raise ValueError(f'unknown {image_set}')
 
 
-from timm.data import create_transform
-from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+
 
 def make_imnet_transforms(image_set, args):
     # args.DATA.TRANSFORM

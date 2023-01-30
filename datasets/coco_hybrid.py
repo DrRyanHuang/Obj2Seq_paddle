@@ -22,8 +22,8 @@ import numpy as np
 from PIL import Image, ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-import torch
-import torch.utils.data
+# import torch
+# import torch.utils.data
 from pycocotools.coco import COCO
 from pycocotools import mask as coco_mask
 
@@ -118,7 +118,7 @@ class CocoHybrid(TvCocoDetection):
     def __getitem__(self, idx):
         if idx < 0:
             img, target = self.dset_kps[-idx]
-            target["num_classes"] = torch.as_tensor([1])
+            target["num_classes"] = paddle.to_tensor([1])
             return img, target
 
         img, target = super().__getitem__(idx)
@@ -128,7 +128,7 @@ class CocoHybrid(TvCocoDetection):
         img, target = self.prepare(img, target)
         if self._transforms is not None:
             img, target = self._transforms(img, target)
-        target["num_classes"] = torch.as_tensor([80])
+        target["num_classes"] = paddle.to_tensor([80])
         return img, target
 
 
@@ -139,13 +139,13 @@ def convert_coco_poly_to_mask(segmentations, height, width):
         mask = coco_mask.decode(rles)
         if len(mask.shape) < 3:
             mask = mask[..., None]
-        mask = torch.as_tensor(mask, dtype=torch.uint8)
-        mask = mask.any(dim=2)
+        mask = paddle.to_tensor(mask, dtype=paddle.uint8)
+        mask = mask.any(axis=2)
         masks.append(mask)
     if masks:
-        masks = torch.stack(masks, dim=0)
+        masks = paddle.stack(masks, axis=0)
     else:
-        masks = torch.zeros((0, height, width), dtype=torch.uint8)
+        masks = paddle.zeros((0, height, width), dtype=paddle.uint8)
     return masks
 
 
@@ -175,14 +175,14 @@ class ConvertCocoPolysToMask(object):
 
         anno = target["annotations"]
         multi_labels = [self.json_category_id_to_contiguous_id[item["category_id"]] for item in anno]
-        super_labels = torch.as_tensor([self.category_id_to_super_id[k] for k in multi_labels], dtype=torch.long).unique()
-        multi_labels = torch.as_tensor(multi_labels, dtype=torch.long).unique()
+        super_labels = paddle.to_tensor([self.category_id_to_super_id[k] for k in multi_labels], dtype=torch.long).unique()
+        multi_labels = paddle.to_tensor(multi_labels, dtype=torch.long).unique()
 
         anno = [obj for obj in anno if 'iscrowd' not in obj or obj['iscrowd'] == 0]
 
         boxes = [obj["bbox"] for obj in anno]
         # guard against no boxes via resizing
-        boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+        boxes = paddle.to_tensor(boxes, dtype=paddle.float32).reshape(-1, 4)
         boxes[:, 2:] += boxes[:, :2]
         boxes[:, 0::2].clamp_(min=0, max=w)
         boxes[:, 1::2].clamp_(min=0, max=h)
@@ -195,12 +195,12 @@ class ConvertCocoPolysToMask(object):
             segmentations = [obj["segmentation"] for obj in anno]
             masks = convert_coco_poly_to_mask(segmentations, h, w)
 
-        keypoints = torch.zeros(classes.shape[0], 17 * 3)
+        keypoints = paddle.zeros(classes.shape[0], 17 * 3)
         anno_kps = self.coco_kps.loadAnns([obj["id"] for obj in anno if obj["category_id"] == 1])
         if anno_kps:
-            keypoints_these = torch.as_tensor([obj["keypoints"] for obj in anno_kps], dtype=torch.float32)
+            keypoints_these = paddle.to_tensor([obj["keypoints"] for obj in anno_kps], dtype=paddle.float32)
             keypoints[classes == 0] = keypoints_these
-        keypoints = keypoints.view(classes.shape[0], 17, 3)
+        keypoints = keypoints.reshape(classes.shape[0], 17, 3)
 
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
         boxes = boxes[keep]
@@ -227,8 +227,8 @@ class ConvertCocoPolysToMask(object):
         target["area"] = area[keep]
         target["iscrowd"] = iscrowd[keep]
 
-        target["orig_size"] = torch.as_tensor([int(h), int(w)])
-        target["size"] = torch.as_tensor([int(h), int(w)])
+        target["orig_size"] = paddle.to_tensor([int(h), int(w)])
+        target["size"] = paddle.to_tensor([int(h), int(w)])
 
         return image, target
 

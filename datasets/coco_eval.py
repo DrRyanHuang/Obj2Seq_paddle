@@ -22,7 +22,7 @@ import os
 import contextlib
 import copy
 import numpy as np
-import torch
+import paddle
 
 from pycocotools.cocoeval import COCOeval
 from pycocotools.coco import COCO
@@ -35,7 +35,7 @@ class CocoEvaluator(object):
     def __init__(self, coco_gt, iou_types, save_json=False):
         assert isinstance(iou_types, (list, tuple))
         coco_gt, contiguous_category_id_to_json_id = coco_gt
-        coco_gt = copy.deepcopy(coco_gt)
+        # coco_gt = copy.deepcopy(coco_gt)
         self.coco_gt = coco_gt
         self.contiguous_category_id_to_json_id = contiguous_category_id_to_json_id
 
@@ -164,7 +164,7 @@ class CocoEvaluator(object):
             scores = prediction["scores"].tolist()
             labels = prediction["labels"].tolist()
             keypoints = prediction["keypoints"]
-            keypoints = keypoints.flatten(start_dim=1).tolist()
+            keypoints = keypoints.flatten(start_axis=1).tolist()
 
             coco_results.extend(
                 [
@@ -182,7 +182,7 @@ class CocoEvaluator(object):
 
 def convert_to_xywh(boxes):
     xmin, ymin, xmax, ymax = boxes.unbind(1)
-    return torch.stack((xmin, ymin, xmax - xmin, ymax - ymin), dim=1)
+    return paddle.stack((xmin, ymin, xmax - xmin, ymax - ymin), axis=1)
 
 
 def merge(img_ids, eval_imgs):

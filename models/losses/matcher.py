@@ -10,14 +10,14 @@
 """
 Modules to compute the matching cost and solve the corresponding LSAP.
 """
-import torch
+# import torch
 from scipy.optimize import linear_sum_assignment
-from torch import nn
+from paddle import nn
 
 from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 
 
-class HungarianMatcher(nn.Module):
+class HungarianMatcher(nn.Layer):
     """This class computes an assignment between the targets and the predictions of the network
     For efficiency reasons, the targets don't include the no_object. Because of this, in general,
     there are more predictions than targets. In this case, we do a 1-to-1 matching of the best predictions,
@@ -65,8 +65,8 @@ class HungarianMatcher(nn.Module):
             out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
             # Also concat the target labels and boxes
-            tgt_ids = torch.cat([v["labels"] for v in targets])
-            tgt_bbox = torch.cat([v["boxes"] for v in targets])
+            tgt_ids = paddle.concat([v["labels"] for v in targets])
+            tgt_bbox = paddle.concat([v["boxes"] for v in targets])
 
             # Compute the classification cost.
             alpha = 0.25
@@ -84,11 +84,11 @@ class HungarianMatcher(nn.Module):
 
             # Final cost matrix
             C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-            C = C.view(bs, num_queries, -1).cpu()
+            C = C.reshape(bs, num_queries, -1).cpu()
 
             sizes = [len(v["boxes"]) for v in targets]
             indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
-            return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+            return [(paddle.to_tensor(i, dtype=torch.int64), paddle.to_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 
 def build_matcher(args):

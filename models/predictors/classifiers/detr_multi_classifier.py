@@ -2,17 +2,17 @@
 # Obj2Seq: Formatting Objects as Sequences with Class Prompt for Visual Tasks
 # Copyright (c) 2022 CASIA & Sensetime. All Rights Reserved.
 # ------------------------------------------------------------------------
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import paddle
+import paddle.nn as nn
+import paddle.nn.functional as F
 import math
 
-class DetrClassifier(nn.Module):
+class DetrClassifier(nn.Layer):
     def __init__(self, args):
         super().__init__()
         self.num_layers = args.num_layers
         if args.num_layers > 0:
-            self.feature_linear = nn.ModuleList([nn.Linear(args.hidden_dim, args.hidden_dim) for i in range(args.num_layers)])
+            self.feature_linear = nn.LayerList([nn.Linear(args.hidden_dim, args.hidden_dim) for i in range(args.num_layers)])
         else:
             self.feature_linear = None
         self.classifier = nn.Linear(args.hidden_dim, 80)
@@ -21,7 +21,7 @@ class DetrClassifier(nn.Module):
     def reset_parameters(self, init_prob):
         prior_prob = init_prob
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        nn.init.constant_(self.classifier.bias.data, bias_value)
+        nn.init.constant_(self.classifier.bias, bias_value)
 
     def forward(self, x, class_vector=None, cls_idx=None):
         # x: bs,cs,(nobj,)d

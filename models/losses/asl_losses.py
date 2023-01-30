@@ -4,11 +4,12 @@
 # ------------------------------------------------------------------------
 # Modified from ASL (https://github.com/Alibaba-MIIL/ASL)
 # ------------------------------------------------------------------------
-import torch
-import torch.nn as nn
+import paddle
+import paddle.nn as nn
+import paddle.nn.functional as F
 
 
-class AsymmetricLoss(nn.Module):
+class AsymmetricLoss(nn.Layer):
     def __init__(self, gamma_neg=4, gamma_pos=1, clip=0.05, eps=1e-8, disable_torch_grad_focal_loss=True):
         super(AsymmetricLoss, self).__init__()
 
@@ -27,17 +28,17 @@ class AsymmetricLoss(nn.Module):
         """
 
         # Calculating Probabilities
-        x_sigmoid = torch.sigmoid(x)
+        x_sigmoid = F.sigmoid(x)
         xs_pos = x_sigmoid
         xs_neg = 1 - x_sigmoid
 
         # Asymmetric Clipping
         if self.clip is not None and self.clip > 0:
-            xs_neg = (xs_neg + self.clip).clamp(max=1)
+            xs_neg = (xs_neg + self.clip).clip(max=1)
 
         # Basic CE calculation
-        los_pos = y * torch.log(xs_pos.clamp(min=self.eps))
-        los_neg = (1 - y) * torch.log(xs_neg.clamp(min=self.eps))
+        los_pos = y * torch.log(xs_pos.clip(min=self.eps))
+        los_neg = (1 - y) * torch.log(xs_neg.clip(min=self.eps))
         loss = los_pos + los_neg
 
         # Asymmetric Focusing
@@ -59,7 +60,7 @@ class AsymmetricLoss(nn.Module):
         # TODO: change this justification
 
 
-class AsymmetricLossOptimized(nn.Module):
+class AsymmetricLossOptimized(nn.Layer):
     ''' Notice - optimized version, minimizes memory allocation and gpu uploading,
     favors inplace operations'''
 
@@ -82,30 +83,31 @@ class AsymmetricLossOptimized(nn.Module):
         y: targets (multi-label binarized vector)
         """
 
-        self.targets = y
-        self.anti_targets = 1 - y
+        self.targets = y.cast("float32")
+        self.anti_targets = 1 - self.targets
 
         # Calculating Probabilities
-        self.xs_pos = torch.sigmoid(x)
+        self.xs_pos = F.sigmoid(x)
         self.xs_neg = 1.0 - self.xs_pos
 
         # Asymmetric Clipping
         if self.clip is not None and self.clip > 0:
-            self.xs_neg.add_(self.clip).clamp_(max=1)
+            # self.xs_neg.add_(self.clip).clamp_(max=1)
+            self.xs_neg = (self.xs_neg + self.clip).clip(max=1)
 
         # Basic CE calculation
-        self.loss = self.targets * torch.log(self.xs_pos.clamp(min=self.eps))
-        self.loss.add_(self.anti_targets * torch.log(self.xs_neg.clamp(min=self.eps)))
+        self.loss = self.targets * paddle.log(self.xs_pos.clip(min=self.eps))
+        self.loss += self.anti_targets * paddle.log(self.xs_neg.clip(min=self.eps))
 
         # Asymmetric Focusing
         if self.gamma_neg > 0 or self.gamma_pos > 0:
             if self.disable_torch_grad_focal_loss:
-                with torch.no_grad():
+                with paddle.no_grad():
                     # if self.disable_torch_grad_focal_loss:
                     #     torch._C.set_grad_enabled(False)
                     self.xs_pos = self.xs_pos * self.targets
                     self.xs_neg = self.xs_neg * self.anti_targets
-                    self.asymmetric_w = torch.pow(1 - self.xs_pos - self.xs_neg,
+                    self.asymmetric_w = paddle.pow(1 - self.xs_pos - self.xs_neg,
                                                 self.gamma_pos * self.targets + self.gamma_neg * self.anti_targets)
                     # if self.disable_torch_grad_focal_loss:
                     #     torch._C.set_grad_enabled(True)
@@ -113,17 +115,17 @@ class AsymmetricLossOptimized(nn.Module):
             else:
                 self.xs_pos = self.xs_pos * self.targets
                 self.xs_neg = self.xs_neg * self.anti_targets
-                self.asymmetric_w = torch.pow(1 - self.xs_pos - self.xs_neg,
+                self.asymmetric_w = paddle.pow(1 - self.xs_pos - self.xs_neg,
                                             self.gamma_pos * self.targets + self.gamma_neg * self.anti_targets)   
                 self.loss *= self.asymmetric_w         
         if weights is not None:
             self.loss *= weights
-        _loss = - self.loss.sum() / x.size(0) * (x.numel() / weights.sum())
+        _loss = - self.loss.sum() / x.size * (x.numel().cast("float32") / weights.sum())
 
         return _loss
 
 
-class ASLSingleLabel(nn.Module):
+class ASLSingleLabel(nn.Layer):
     '''
     This loss is intended for single-label classification problems
     '''
@@ -131,7 +133,7 @@ class ASLSingleLabel(nn.Module):
         super(ASLSingleLabel, self).__init__()
 
         self.eps = eps
-        self.logsoftmax = nn.LogSoftmax(dim=-1)
+        self.logsoftmax = nn.LogSoftmax(axis=-1)
         self.targets_classes = []
         self.gamma_pos = gamma_pos
         self.gamma_neg = gamma_neg
@@ -144,7 +146,7 @@ class ASLSingleLabel(nn.Module):
         '''
         num_classes = inputs.size()[-1]
         log_preds = self.logsoftmax(inputs)
-        self.targets_classes = torch.zeros_like(inputs).scatter_(1, target.long().unsqueeze(1), 1)
+        self.targets_classes = paddle.zeros_like(inputs).scatter_(1, target.long().unsqueeze(1), 1)
 
         # ASL weights
         targets = self.targets_classes
@@ -163,7 +165,7 @@ class ASLSingleLabel(nn.Module):
         # loss calculation
         loss = - self.targets_classes.mul(log_preds)
 
-        loss = loss.sum(dim=-1)
+        loss = loss.sum(axis=-1)
         if self.reduction == 'mean':
             loss = loss.mean()
 

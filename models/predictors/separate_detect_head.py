@@ -3,9 +3,9 @@
 # Copyright (c) 2022 CASIA & Sensetime. All Rights Reserved.
 # ------------------------------------------------------------------------
 import numpy as np
-import torch
-from torch import nn
-from torch.nn import functional as F
+# import torch
+from paddle import nn
+from paddle.nn import functional as F
 
 from util.misc import inverse_sigmoid
 from .classifiers import build_label_classifier
@@ -13,7 +13,7 @@ from models.losses.classwise_criterion import ClasswiseCriterion
 from models.losses.set_criterion import SetCriterion
 
 
-class SeparateDetectHead(nn.Module):
+class SeparateDetectHead(nn.Layer):
     def __init__(self, args):
         super().__init__()
         # output prediction
@@ -28,13 +28,13 @@ class SeparateDetectHead(nn.Module):
         self.criterion = SetCriterion(args.LOSS) if "multi" in args.CLASSIFIER.type else ClasswiseCriterion(args.LOSS)
 
     def reset_parameters_as_first_head(self):
-        nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
-        nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
-        nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
+        nn.init.constant_(self.bbox_embed.layers[-1].weight, 0)
+        nn.init.constant_(self.bbox_embed.layers[-1].bias, 0)
+        nn.init.constant_(self.bbox_embed.layers[-1].bias[2:], -2.0)
 
     def reset_parameters_as_refine_head(self):
-        nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
-        nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
+        nn.init.constant_(self.bbox_embed.layers[-1].weight, 0)
+        nn.init.constant_(self.bbox_embed.layers[-1].bias, 0)
 
     def forward(self, feat, query_pos, reference_points, srcs, src_padding_masks, **kwargs):
         # feat:
@@ -56,7 +56,7 @@ class SeparateDetectHead(nn.Module):
         outputs = {
             "pred_logits": outputs_class.unsqueeze(-1) if  feat.dim() == 4 else outputs_class,
             "pred_boxes": outputs_coord,
-            "class_index": cls_idx if cls_idx is not None else torch.zeros((bs, 1), dtype=torch.int64, device=outputs_class.device)
+            "class_index": cls_idx if cls_idx is not None else paddle.zeros((bs, 1), dtype=torch.int64, device=outputs_class.device)
         }
 
         targets = kwargs.pop("targets", None)
@@ -68,12 +68,12 @@ class SeparateDetectHead(nn.Module):
         return outputs, detection_loss_dict
 
 
-class MLP(nn.Module):
+class MLP(nn.Layer):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = nn.LayerList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
 
     def forward(self, x):
         # x: bs, cs, obj, c
