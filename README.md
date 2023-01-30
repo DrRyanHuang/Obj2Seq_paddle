@@ -1,6 +1,56 @@
 **Obj2Seq**: Formatting Objects as Sequences with Class Prompt for Visual Tasks
 ========
 
+
+这是一个 Obj2Seq 的 Paddle 的实现版本
+
+首先需要解压 COCO 并创建软连接, 请将以下路径改成所需要的:
+```
+# ---------- images ----------
+ls /home/aistudio/data
+!unzip -qq /home/aistudio/data/data103218/train2017.zip -d /home/aistudio/data/data103218/
+unzip -qq /home/aistudio/data/data103218/val2017.zip   -d   /home/aistudio/data/data103218/
+
+# ---------- annotation ----------
+unzip /home/aistudio/data/data103218/annotations_trainval2017.zip  -d   /home/aistudio/data/data103218/
+
+# mkdir -p data
+# ln -s /home/aistudio/data/data103218/ data/coco
+```
+
+
+训练:
+```
+python -m paddle.distributed.launch main.py --auto_resume  --cfg configs/detection_r50_seqhead.yaml   --output_dir output
+```
+
+验证:
+```
+python -m paddle.distributed.launch main.py --auto_resume  --cfg configs/detection_r50_seqhead.yaml   --output_dir output
+```
+
+
+如需关闭 fleet 来调试 或 打开 amp 请打开 `config.py` 中的 246 行内容:
+
+```
+_C.TRAIN.fleet = True
+_C.TRAIN.amp = False
+```
+
+目前在 AIStudio 上开启 AMP 会存在 loss 为 NaN 的问题, 不建议使用
+
+
+目前与原仓库没对齐的部分:
+
+- 在数据预处理是, 没有 RandomSizeCrop, 单卡没问题, 训练集多卡一旦有会 SegmentFault 的问题, 尽管已经修复了一版, 但可能依旧存在别的问题, 所以在预处理中删除了
+- Prompt Indicator 部分的输出会与最终的置信度相乘, 但实际证明无法训练, 则将 config 的 combine_method 改成 none, 而不是 multiply
+- 在 head 的部分 `models/predictors/classifiers/label_classifier.py` 50 行 `self.b` 加上偏置 b 被注释掉, 发现其导致输出置信度很低, loss不下降
+
+
+TO Be Continue...
+
+
+
 ## Introduction
 This repository is an official implementation of the **[Obj2Seq](https://arxiv.org/abs/2209.13948)**.
 Obj2Seq takes objects as basic units, and regards most object-level visual tasks as sequence generation problems of objects.
