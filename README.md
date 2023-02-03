@@ -28,7 +28,7 @@ python -m paddle.distributed.launch main.py --auto_resume  --cfg configs/detecti
 
 验证:
 ```
-python -m paddle.distributed.launch main.py --auto_resume  --cfg configs/detection_r50_seqhead.yaml   --output_dir output
+python -m paddle.distributed.launch main.py --auto_resume  --cfg configs/detection_r50_seqhead.yaml   --output_dir output  --eval  
 ```
 
 
