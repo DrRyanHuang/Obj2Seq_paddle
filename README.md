@@ -44,8 +44,8 @@ _C.TRAIN.amp = False
 
 - 在数据预处理是, 没有 RandomSizeCrop, 单卡没问题, 训练集多卡一旦有会 SegmentFault 的问题, 尽管已经修复了一版, 但可能依旧存在别的问题, 所以在预处理中删除了
 - Prompt Indicator 部分的输出会与最终的置信度相乘, 但实际证明无法训练, 则将 config 的 combine_method 改成 none, 而不是 multiply
-- 在 head 的部分 `models/predictors/classifiers/label_classifier.py` 50 行 `self.b` 加上偏置 b 被注释掉, 发现其导致输出置信度很低, loss不下降
-
+- ~在 head 的部分 `models/predictors/classifiers/label_classifier.py` 50 行 `self.b` 加上偏置 b 被注释掉, 发现其导致输出置信度很低, loss不下降~ (已修改)
+- 由于显存限制，在 MLP 中 1024 节点改成了 512 节点，Decoder少了一个 DecoderLayer
 
 TO Be Continue...
 
