@@ -14,8 +14,10 @@ unzip -qq /home/aistudio/data/data103218/val2017.zip   -d   /home/aistudio/data/
 # ---------- annotation ----------
 unzip /home/aistudio/data/data103218/annotations_trainval2017.zip  -d   /home/aistudio/data/data103218/
 
-# mkdir -p data
-# ln -s /home/aistudio/data/data103218/ data/coco
+
+cd Obj2Seq_paddle
+mkdir -p data
+ln -s /home/aistudio/data/data103218/ data/coco
 ```
 
 
